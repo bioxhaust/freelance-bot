@@ -264,15 +264,108 @@ async def check_http_client() -> None:
     print("[OK] HttpClient session reuse + reopen")
 
 
+async def check_runtime_state() -> None:
+    from runtime_state import RuntimeState
+
+    rt = RuntimeState.from_settings(threshold=70)
+    assert rt.relevance_threshold == 70 and rt.paused is False
+    await rt.set_paused(True)
+    assert rt.paused is True
+    new_t = await rt.set_threshold(150)
+    assert new_t == 100, f"clamp failed: {new_t}"
+    new_t = await rt.set_threshold(-5)
+    assert new_t == 0
+    print("[OK] RuntimeState: pause/resume/threshold clamping")
+
+
+async def check_llm_cache() -> None:
+    """Verify TTL cache short-circuits repeat calls without hitting LLM."""
+    from llm import LLMClient, _hash_key
+
+    # Use a stub so we don't actually call Ollama.
+    class _StubHttp:
+        def __init__(self) -> None:
+            self.calls = 0
+        async def request_with_retry(self, *args, **kwargs):
+            raise AssertionError("HTTP must not be called when cache is warm")
+
+    llm = LLMClient(api_key="x", model="x", http=_StubHttp())  # type: ignore[arg-type]
+    # Pre-populate cache as if a previous call had filled it.
+    key_score = _hash_key("score", "S", "T", "D")
+    llm._score_cache[key_score] = 73
+    got = await llm.score_relevance("S", "T", "D")
+    assert got == 73 and llm.cache_hits == 1, (got, llm.cache_hits)
+
+    key_draft = _hash_key("draft", "S", "T", "D", "700", "")
+    llm._draft_cache[key_draft] = "cached draft"
+    got_d = await llm.generate_reply_draft("S", "T", "D")
+    assert got_d == "cached draft" and llm.cache_hits == 2
+
+    stats = llm.cache_stats()
+    assert stats["hits"] == 2 and stats["misses"] == 0
+    print("[OK] LLM TTL cache hits short-circuit HTTP")
+
+
+async def check_db_extended() -> None:
+    """Validate stats/top_unhandled/applied_today against a temp DB."""
+    import os
+    import tempfile
+    from db import Database
+    from exchanges import Order
+
+    # Use a fresh temp DB so tests don't pollute the live one.
+    tmp_dir = tempfile.mkdtemp(prefix="smoke_db_")
+    db_path = os.path.join(tmp_dir, "stats.db")
+    db = Database(db_path)
+    await db.init()
+
+    samples = [
+        Order(title=f"Order {i}", description=f"desc {i}",
+              price="500", deadline="—", client="—",
+              source="Kwork" if i % 2 == 0 else "FL.ru",
+              url=f"https://x.example/{i}")
+        for i in range(10)
+    ]
+    for i, o in enumerate(samples):
+        await db.save_order_if_new(o, relevance=10 * i)
+
+    await db.mark_applied(samples[8].url)
+    await db.mark_applied(samples[9].url)
+
+    stats = await db.stats(threshold=70)
+    assert stats["last_24h"] == 10, stats
+    assert stats["passed_24h"] == 3, stats  # rel 70, 80, 90
+    assert stats["applied"] == 2, stats
+    assert stats["sent_24h"] == 2, stats
+    by_src = dict(stats["by_source_24h"])
+    assert by_src.get("Kwork") == 5 and by_src.get("FL.ru") == 5
+
+    top = await db.top_unhandled(threshold=70, limit=5)
+    assert len(top) == 1, [o.title for o in top]  # rel=70 only (80/90 are applied)
+    assert top[0].title == "Order 7", top[0].title
+
+    applied = await db.applied_today(limit=10)
+    assert {o.title for o in applied} == {"Order 8", "Order 9"}
+
+    await db.close()
+    print("[OK] db.stats / top_unhandled / applied_today")
+
+
 async def main() -> None:
     print("== db.py ==")
     await check_db()
+    print("\n== db.py extended (stats/top/applied_today) ==")
+    await check_db_extended()
+    print("\n== runtime_state.py ==")
+    await check_runtime_state()
     print("\n== http_client.py ==")
     await check_http_client()
     print("\n== notifier.py ==")
     check_notifier()
     print("\n== llm.py ==")
     check_llm_score()
+    print("\n== llm.py TTL cache ==")
+    await check_llm_cache()
     print("\n== config.py ==")
     check_config()
     print("\n== exchanges/kwork.py (against fixtures) ==")

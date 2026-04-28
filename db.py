@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import aiosqlite
 
@@ -226,7 +226,7 @@ class Database:
             (url,),
         )
 
-    async def stats(self) -> dict[str, int | float]:
+    async def stats(self, threshold: int = 70) -> dict[str, Any]:
         async with self.conn.execute(
             """
             SELECT
@@ -237,17 +237,81 @@ class Database:
                          THEN 1 ELSE 0 END)                                 AS last_24h,
                 SUM(CASE WHEN applied = 1
                               AND applied_at >= datetime('now','-1 day')
-                         THEN 1 ELSE 0 END)                                 AS sent_24h
+                         THEN 1 ELSE 0 END)                                 AS sent_24h,
+                SUM(CASE WHEN relevance >= ?
+                              AND created_at >= datetime('now','-1 day')
+                         THEN 1 ELSE 0 END)                                 AS passed_24h
             FROM orders
-            """
+            """,
+            (int(threshold),),
         ) as cur:
             row = await cur.fetchone()
-        if row is None:
-            return {"total": 0, "applied": 0, "avg_relevance": 0.0, "last_24h": 0, "sent_24h": 0}
+
+        async with self.conn.execute(
+            """
+            SELECT source, COUNT(*) AS cnt
+            FROM orders
+            WHERE created_at >= datetime('now','-1 day')
+            GROUP BY source
+            ORDER BY cnt DESC
+            """
+        ) as cur:
+            by_source = [(r[0], int(r[1])) async for r in cur]
+
         return {
-            "total": int(row[0] or 0),
-            "applied": int(row[1] or 0),
-            "avg_relevance": float(row[2] or 0.0),
-            "last_24h": int(row[3] or 0),
-            "sent_24h": int(row[4] or 0),
+            "total": int(row[0] or 0) if row else 0,
+            "applied": int(row[1] or 0) if row else 0,
+            "avg_relevance": float(row[2] or 0.0) if row else 0.0,
+            "last_24h": int(row[3] or 0) if row else 0,
+            "sent_24h": int(row[4] or 0) if row else 0,
+            "passed_24h": int(row[5] or 0) if row else 0,
+            "by_source_24h": by_source,
         }
+
+    async def top_unhandled(
+        self, threshold: int, limit: int = 5
+    ) -> list[Order]:
+        """Top relevance >=threshold orders from last 24h that the user
+        has not yet marked applied. Used by /digest."""
+        async with self.conn.execute(
+            """
+            SELECT title, description, price, deadline, client, source, url
+            FROM orders
+            WHERE relevance IS NOT NULL
+              AND relevance >= ?
+              AND applied = 0
+              AND created_at >= datetime('now','-1 day')
+            ORDER BY relevance DESC, created_at DESC
+            LIMIT ?
+            """,
+            (int(threshold), int(limit)),
+        ) as cur:
+            rows = [r async for r in cur]
+        return [
+            Order(
+                title=r[0], description=r[1], price=r[2], deadline=r[3],
+                client=r[4], source=r[5], url=r[6],
+            )
+            for r in rows
+        ]
+
+    async def applied_today(self, limit: int = 10) -> list[Order]:
+        async with self.conn.execute(
+            """
+            SELECT title, description, price, deadline, client, source, url
+            FROM orders
+            WHERE applied = 1
+              AND applied_at >= datetime('now','-1 day')
+            ORDER BY applied_at DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ) as cur:
+            rows = [r async for r in cur]
+        return [
+            Order(
+                title=r[0], description=r[1], price=r[2], deadline=r[3],
+                client=r[4], source=r[5], url=r[6],
+            )
+            for r in rows
+        ]

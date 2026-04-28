@@ -9,6 +9,7 @@ from db import Database
 from exchanges import Exchange, Order
 from llm import LLMClient
 from notifier import TelegramNotifier
+from runtime_state import RuntimeState
 
 logger = logging.getLogger(__name__)
 
@@ -24,24 +25,35 @@ class Scheduler:
         exchanges: list[Exchange],
         llm: LLMClient,
         notifier: TelegramNotifier,
+        runtime: RuntimeState,
     ) -> None:
         self.settings = settings
         self.db = db
         self.exchanges = exchanges
         self.llm = llm
         self.notifier = notifier
+        self.runtime = runtime
+        self.last_cycle_seconds: float = 0.0
+        self.last_cycle_started_at: float = 0.0
 
     async def run_forever(self) -> None:
         cycle = 0
         while True:
             cycle += 1
-            logger.info("Cycle %s started", cycle)
-            await self.run_once()
-            logger.info(
-                "Cycle %s finished, sleep %ss",
-                cycle,
-                self.settings.poll_interval_seconds,
-            )
+            if self.runtime.paused:
+                logger.info("Cycle %s skipped (paused)", cycle)
+            else:
+                logger.info("Cycle %s started (threshold=%d)", cycle, self.runtime.relevance_threshold)
+                started = asyncio.get_event_loop().time()
+                self.last_cycle_started_at = started
+                await self.run_once()
+                self.last_cycle_seconds = asyncio.get_event_loop().time() - started
+                logger.info(
+                    "Cycle %s finished in %.1fs, sleep %ss",
+                    cycle,
+                    self.last_cycle_seconds,
+                    self.settings.poll_interval_seconds,
+                )
             await asyncio.sleep(self.settings.poll_interval_seconds)
 
     async def run_once(self) -> None:
@@ -131,7 +143,7 @@ class Scheduler:
 
             await self.db.update_relevance(order.url, relevance)
 
-            if relevance >= self.settings.relevance_threshold:
+            if relevance >= self.runtime.relevance_threshold:
                 passed_threshold += 1
                 draft_reply = ""
                 if self.settings.draft_mode:

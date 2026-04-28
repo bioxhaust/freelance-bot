@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import re
 from typing import Any, Optional
 
 import aiohttp
+from cachetools import TTLCache
 
 from http_client import HttpClient
 
 logger = logging.getLogger(__name__)
 
 OLLAMA_CLOUD_URL = "https://ollama.com/api/chat"
+
+_DEFAULT_DRAFT_CACHE_TTL = 30 * 60  # 30 minutes
+_DEFAULT_DRAFT_CACHE_SIZE = 256
+_DEFAULT_SCORE_CACHE_TTL = 60 * 60  # 1 hour
+_DEFAULT_SCORE_CACHE_SIZE = 512
 
 
 class LLMClient:
@@ -20,12 +28,35 @@ class LLMClient:
         api_key: str,
         model: str,
         http: Optional[HttpClient] = None,
+        *,
+        draft_cache_ttl: int = _DEFAULT_DRAFT_CACHE_TTL,
+        score_cache_ttl: int = _DEFAULT_SCORE_CACHE_TTL,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.http = http or HttpClient(total_timeout=90.0, sock_read=80.0)
+        # TTL caches: key is a hash of (skills, title, description, action, ...).
+        # Saves Ollama tokens on repeat clicks of "Перегенерить / Короче / Сменить тон"
+        # for the same order, and on re-running score for the same content.
+        self._draft_cache: TTLCache[str, str] = TTLCache(
+            maxsize=_DEFAULT_DRAFT_CACHE_SIZE, ttl=draft_cache_ttl
+        )
+        self._score_cache: TTLCache[str, int] = TTLCache(
+            maxsize=_DEFAULT_SCORE_CACHE_SIZE, ttl=score_cache_ttl
+        )
+        self._cache_lock = asyncio.Lock()
+        self.cache_hits = 0
+        self.cache_misses = 0
 
     async def score_relevance(self, skills: str, title: str, description: str) -> int:
+        cache_key = _hash_key("score", skills, title, description)
+        async with self._cache_lock:
+            cached = self._score_cache.get(cache_key)
+        if cached is not None:
+            self.cache_hits += 1
+            return cached
+        self.cache_misses += 1
+
         system = (
             "Ты ассистент по отбору фриланс-заказов. "
             "Оцени релевантность заказа моим навыкам по шкале 0..100 и верни строго JSON "
@@ -47,7 +78,10 @@ class LLMClient:
             )
             score = _parse_score_json(content)
             if score is not None:
-                return _clamp_score(score)
+                clamped = _clamp_score(score)
+                async with self._cache_lock:
+                    self._score_cache[cache_key] = clamped
+                return clamped
             logger.warning(
                 "LLM JSON did not contain score field, falling back. raw=%r", content[:200]
             )
@@ -60,7 +94,10 @@ class LLMClient:
             f"{user}"
         )
         text = await self._chat(prompt)
-        return _clamp_score(_parse_score_fallback(text))
+        clamped = _clamp_score(_parse_score_fallback(text))
+        async with self._cache_lock:
+            self._score_cache[cache_key] = clamped
+        return clamped
 
     async def generate_reply_draft(
         self,
@@ -70,6 +107,16 @@ class LLMClient:
         max_chars: int = 700,
         style_hint: str = "",
     ) -> str:
+        cache_key = _hash_key(
+            "draft", skills, title, description, str(max_chars), style_hint
+        )
+        async with self._cache_lock:
+            cached = self._draft_cache.get(cache_key)
+        if cached is not None:
+            self.cache_hits += 1
+            return cached
+        self.cache_misses += 1
+
         prompt = (
             "Ты помогаешь писать отклики на фриланс-заказы.\n"
             "Сформируй краткий, уверенный и дружелюбный отклик на русском языке.\n"
@@ -84,8 +131,18 @@ class LLMClient:
             f"Название заказа:\n{title}\n\n"
             f"Описание заказа:\n{description}\n"
         )
-        draft = await self._chat(prompt)
-        return _smart_truncate(draft, max_chars)
+        draft = _smart_truncate(await self._chat(prompt), max_chars)
+        async with self._cache_lock:
+            self._draft_cache[cache_key] = draft
+        return draft
+
+    def cache_stats(self) -> dict[str, int]:
+        return {
+            "hits": self.cache_hits,
+            "misses": self.cache_misses,
+            "draft_size": len(self._draft_cache),
+            "score_size": len(self._score_cache),
+        }
 
     async def explain_relevance(
         self,
@@ -144,6 +201,16 @@ class LLMClient:
 _JSON_SCORE_RE = re.compile(r'"score"\s*:\s*(\d{1,3})')
 _NUMBER_RE = re.compile(r"\b(\d{1,3})\b")
 _SENTENCE_END_RE = re.compile(r"[.!?…](?:\s|$)")
+
+
+def _hash_key(*parts: str) -> str:
+    """Stable cache key. SHA-1 truncated to 32 hex chars (128 bits) — plenty
+    for collision resistance at our scale."""
+    h = hashlib.sha1()
+    for part in parts:
+        h.update(part.encode("utf-8", errors="replace"))
+        h.update(b"\x1f")  # unit separator
+    return h.hexdigest()[:32]
 
 
 def _clamp_score(score: int) -> int:

@@ -15,6 +15,7 @@ from db import Database
 from exchanges import Order
 from llm import LLMClient
 from notifier import TelegramNotifier
+from runtime_state import RuntimeState
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +57,14 @@ class TelegramAssistant:
         db: Database,
         llm: LLMClient,
         notifier: TelegramNotifier,
+        runtime: RuntimeState,
     ) -> None:
         self.bot = bot
         self.settings = settings
         self.db = db
         self.llm = llm
         self.notifier = notifier
+        self.runtime = runtime
         self.offset = 0
         # Per-process idempotency: message_ids that have already received a
         # final state (Sent / Skipped / Archived) — guards against the
@@ -114,12 +117,38 @@ class TelegramAssistant:
         if message.from_user and message.from_user.is_bot:
             return
 
-        text = message.text.strip().lower()
-        if text in ("/help_ai", "/help"):
+        text = message.text.strip()
+        lowered = text.lower()
+        if lowered in ("/help_ai", "/help", "/start"):
             await self._send_help(message)
             return
-        if text not in ("черновик", "короче", "жестче", "дружелюбнее", "почему"):
+        if lowered in ("/stats",):
+            await self._cmd_stats(message)
             return
+        if lowered in ("/digest",):
+            await self._cmd_digest(message)
+            return
+        if lowered in ("/pause",):
+            await self.runtime.set_paused(True)
+            await message.reply("⏸ Опрос бирж приостановлен. /resume чтобы возобновить.")
+            return
+        if lowered in ("/resume",):
+            await self.runtime.set_paused(False)
+            await message.reply("▶️ Опрос возобновлён.")
+            return
+        if lowered.startswith("/threshold"):
+            await self._cmd_threshold(message, text)
+            return
+        if lowered in ("/skills",):
+            await message.reply(
+                f"<b>Текущие навыки</b> (для LLM):\n<blockquote>"
+                f"{html.escape(self.settings.my_skills, quote=False)}</blockquote>",
+                parse_mode="HTML",
+            )
+            return
+        if lowered not in ("черновик", "короче", "жестче", "дружелюбнее", "почему"):
+            return
+        text = lowered
 
         parent = message.reply_to_message
         if parent is None or parent.text is None:
@@ -384,16 +413,108 @@ class TelegramAssistant:
         except ValueError:
             return 0
 
+    async def _cmd_stats(self, message: Message) -> None:
+        threshold = self.runtime.relevance_threshold
+        stats = await self.db.stats(threshold=threshold)
+        cache = self.llm.cache_stats()
+        sources = stats.get("by_source_24h") or []
+        sources_line = (
+            " · ".join(f"{src} {cnt}" for src, cnt in sources)
+            if sources else "—"
+        )
+        paused_str = "⏸ ПАУЗА" if self.runtime.paused else "▶️ работает"
+        text = (
+            f"<b>📊 Статистика</b>  ({paused_str})\n\n"
+            f"<b>За 24 часа</b>\n"
+            f"• Новых заказов: {stats['last_24h']}\n"
+            f"• Прошли порог ≥{threshold}%: {stats['passed_24h']}\n"
+            f"• Отправлено: {stats['sent_24h']}\n"
+            f"• Источники: {sources_line}\n\n"
+            f"<b>Всего</b>\n"
+            f"• В базе: {stats['total']}\n"
+            f"• Отправлено за всё время: {stats['applied']}\n"
+            f"• Средняя релевантность: {stats['avg_relevance']:.1f}\n\n"
+            f"<b>LLM-кэш</b>\n"
+            f"• Hits/Misses: {cache['hits']}/{cache['misses']}\n"
+            f"• Размер: drafts={cache['draft_size']} / scores={cache['score_size']}"
+        )
+        await message.reply(text, parse_mode="HTML", disable_web_page_preview=True)
+
+    async def _cmd_digest(self, message: Message) -> None:
+        threshold = self.runtime.relevance_threshold
+        applied = await self.db.applied_today(limit=10)
+        unhandled = await self.db.top_unhandled(threshold=threshold, limit=5)
+        stats = await self.db.stats(threshold=threshold)
+
+        lines: list[str] = ["<b>📅 Дайджест за день</b>", ""]
+        lines.append(f"✅ <b>Отправлено:</b> {stats['sent_24h']}")
+        for o in applied[:5]:
+            title_safe = html.escape(o.title[:60], quote=False)
+            url_safe = html.escape(o.url, quote=True)
+            lines.append(f'   • <a href="{url_safe}">{title_safe}</a> · {html.escape(o.source, quote=False)}')
+
+        if unhandled:
+            lines.append("")
+            lines.append(f"🔥 <b>Топ-{len(unhandled)} нерасхваченных (≥{threshold}%):</b>")
+            for o in unhandled:
+                rel = await self._relevance_for(o.url)
+                title_safe = html.escape(o.title[:60], quote=False)
+                url_safe = html.escape(o.url, quote=True)
+                lines.append(
+                    f'   • <a href="{url_safe}">{title_safe}</a> · '
+                    f'{rel}% · {html.escape(o.source, quote=False)}'
+                )
+
+        lines.append("")
+        lines.append(f"📥 За 24ч поступило: {stats['last_24h']}")
+        text = "\n".join(lines)
+        await message.reply(text, parse_mode="HTML", disable_web_page_preview=True)
+
+    async def _cmd_threshold(self, message: Message, raw: str) -> None:
+        parts = raw.split()
+        if len(parts) == 1:
+            await message.reply(
+                f"Текущий порог: <b>{self.runtime.relevance_threshold}%</b>.\n"
+                "Использование: <code>/threshold 75</code>",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            new_value = int(parts[1])
+        except ValueError:
+            await message.reply("Порог должен быть целым числом 0..100.")
+            return
+        applied = await self.runtime.set_threshold(new_value)
+        await message.reply(
+            f"✅ Порог релевантности теперь <b>{applied}%</b>.",
+            parse_mode="HTML",
+        )
+
+    async def _relevance_for(self, url: str) -> int:
+        async with self.db.conn.execute(
+            "SELECT relevance FROM orders WHERE url = ? LIMIT 1", (url,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None or row[0] is None:
+            return 0
+        return int(row[0])
+
     async def _send_help(self, message: Message) -> None:
         await message.reply(
-            "Кнопки под объявлением (рекомендуется):\n"
+            "<b>Кнопки под карточкой:</b>\n"
             "• 📨 Отправить — пометить как отправленное\n"
             "• ✏️ Сгенерировать черновик / 🔄 Перегенерить\n"
             "• ✂️ Короче — компактный отклик\n"
             "• 🎭 Сменить тон — 💼 Деловой / 🤝 Дружелюбный / 🔥 Жёсткий\n"
             "• ❓ Почему — пояснение релевантности\n"
-            "• 🌐 Открыть — открыть заказ на бирже\n"
-            "• ⏭ Пропустить / 🗄 В архив\n\n"
-            "Текстовые команды (ответом на карточку): черновик / короче / жестче / "
-            "дружелюбнее / почему."
+            "• 🌐 Открыть / ⏭ Пропустить / 🗄 В архив\n\n"
+            "<b>Команды:</b>\n"
+            "/stats — статистика за 24ч\n"
+            "/digest — сводка дня (отправлено + топ нерасхваченных)\n"
+            "/threshold N — поменять порог релевантности (0..100)\n"
+            "/pause /resume — поставить опрос на паузу\n"
+            "/skills — показать текущие навыки\n\n"
+            "<b>Текстовые команды</b> (ответом на карточку):\n"
+            "черновик / короче / жестче / дружелюбнее / почему",
+            parse_mode="HTML",
         )

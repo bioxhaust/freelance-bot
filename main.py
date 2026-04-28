@@ -9,12 +9,14 @@ from exchanges import FLRuExchange, KworkExchange
 from http_client import HttpClient
 from llm import LLMClient
 from notifier import TelegramNotifier
+from runtime_state import RuntimeState
 from scheduler import Scheduler
 from telegram_assistant import TelegramAssistant
 
 
 async def main() -> None:
     settings = load_settings()
+    runtime = RuntimeState.from_settings(settings.relevance_threshold)
 
     db = Database("orders.db")
     await db.init()
@@ -50,6 +52,7 @@ async def main() -> None:
         exchanges=exchanges,
         llm=llm,
         notifier=notifier,
+        runtime=runtime,
     )
     assistant = TelegramAssistant(
         bot=notifier.bot,
@@ -57,6 +60,7 @@ async def main() -> None:
         db=db,
         llm=llm,
         notifier=notifier,
+        runtime=runtime,
     )
 
     try:
