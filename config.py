@@ -6,7 +6,10 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# override=True so .env is the source of truth even if the shell already
+# exported some of these vars (which happens easily when you `source .env`
+# manually for curl / debugging).
+load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
