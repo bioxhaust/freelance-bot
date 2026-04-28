@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+
+from http_client import HttpClient
+
+from .base import Exchange, Order
+
+logger = logging.getLogger(__name__)
+
+_MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
+
+class KworkExchange(Exchange):
+    source_name = "Kwork"
+    projects_url = "https://kwork.ru/projects"
+
+    def __init__(
+        self,
+        http: HttpClient,
+        cookies: str = "",
+        max_pages: int = 10,
+        categories: tuple[int, ...] = (41, 11, 45),
+        page_concurrency: int = 4,
+    ) -> None:
+        self.http = http
+        self.cookies = cookies
+        self.max_pages = max(1, max_pages)
+        self.categories = tuple(categories) if categories else (41, 11, 45)
+        self._page_sem = asyncio.Semaphore(max(1, page_concurrency))
+        self._created_at_by_url: dict[str, datetime] = {}
+
+    def debug_context(self) -> str:
+        return f"categories={','.join(str(x) for x in self.categories)}"
+
+    def order_age_minutes(self, order: Order) -> Optional[int]:
+        created_at = self._created_at_by_url.get(order.url)
+        if created_at is None:
+            return None
+        delta = datetime.now(timezone.utc) - created_at
+        return max(0, int(delta.total_seconds() // 60))
+
+    async def fetch_orders(self) -> list[Order]:
+        tasks = [
+            self._fetch_page(category_id, page)
+            for category_id in self.categories
+            for page in range(1, self.max_pages + 1)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        items: list[dict] = []
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning("Kwork page fetch failed: %r", result)
+                continue
+            items.extend(result)
+
+        orders: list[Order] = []
+        seen_urls: set[str] = set()
+        created_at_by_url: dict[str, datetime] = {}
+        category_mismatches = 0
+
+        for item in items:
+            order_id = item.get("id")
+            if not order_id:
+                continue
+
+            user = item.get("user") or {}
+            title = (item.get("name") or "").strip()
+            if not title:
+                continue
+
+            description = (item.get("description") or "").strip() or title
+            price_limit = (item.get("priceLimit") or "").strip()
+            price = f"{price_limit} RUB" if price_limit else "по договоренности"
+            deadline = (item.get("max_days") or "").strip() or "не указан"
+            client = (user.get("username") or "").strip() or "не указан"
+            url = f"https://kwork.ru/projects/{order_id}/view"
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            actual_cat = item.get("category_id")
+            if (
+                actual_cat is not None
+                and self.categories
+                and actual_cat not in self.categories
+            ):
+                category_mismatches += 1
+
+            date_create = (item.get("date_create") or "").strip()
+            if date_create:
+                try:
+                    naive = datetime.strptime(date_create, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    pass
+                else:
+                    aware_msk = naive.replace(tzinfo=_MOSCOW_TZ)
+                    created_at_by_url[url] = aware_msk.astimezone(timezone.utc)
+
+            orders.append(
+                Order(
+                    title=title,
+                    description=description,
+                    price=price,
+                    deadline=deadline,
+                    client=client,
+                    source=self.source_name,
+                    url=url,
+                )
+            )
+
+        if category_mismatches:
+            logger.info(
+                "Kwork category mismatches: %d items returned outside requested %s",
+                category_mismatches, self.categories,
+            )
+
+        self._created_at_by_url = created_at_by_url
+        return orders
+
+    async def _fetch_page(self, category_id: int, page: int) -> list[dict]:
+        async with self._page_sem:
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "ru,en;q=0.9",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+            if self.cookies:
+                headers["Cookie"] = self.cookies
+
+            response = await self.http.request_with_retry(
+                "POST",
+                self.projects_url,
+                data={"page": str(page), "c": str(category_id)},
+                headers=headers,
+            )
+            async with response:
+                response.raise_for_status()
+                payload = await response.json(content_type=None)
+
+        page_items = ((payload.get("data") or {}).get("pagination") or {}).get("data") or []
+        return page_items

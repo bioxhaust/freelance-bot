@@ -1,0 +1,20 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local SQLite databases (contain real order data)
+*.db
+*.db-wal
+*.db-shm
+*.db.bak.*
+
+# Test fixtures may contain account-specific HTML/JSON
+tests/fixtures/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
