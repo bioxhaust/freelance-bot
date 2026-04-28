@@ -210,6 +210,12 @@ class Database:
             (int(relevance), url),
         )
 
+    async def update_description(self, url: str, description: str) -> None:
+        await self.conn.execute(
+            "UPDATE orders SET description = ? WHERE url = ?",
+            (description, url),
+        )
+
     async def is_applied(self, url: str) -> bool:
         async with self.conn.execute(
             "SELECT applied FROM orders WHERE url = ? LIMIT 1", (url,)

@@ -43,15 +43,19 @@ def sanitize_kwork(in_path: Path, out_path: Path, max_items: int = 3) -> None:
 
 
 def sanitize_flru(in_path: Path, out_path: Path) -> None:
-    """For FL.ru we just strip cookies / csrf tokens / analytics from the
-    head. The body (lenta cards) is kept as-is — it's public content.
+    """For FL.ru we strip cookies / analytics — but KEEP JSON-LD scripts,
+    since our detail-page parser reads the description from there.
     """
     html = in_path.read_text()
-    # Strip the entire <head> ... </head> (no parser needs it for our tests).
+    # Strip <head> entirely — no test needs it.
     html = re.sub(r"<head\b[^>]*>.*?</head>", "<head></head>", html, flags=re.DOTALL)
-    # Strip every <script>...</script>: contains analytics + may contain ids.
-    html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.DOTALL)
-    # Remove any leftover ad-style iframes.
+    # Strip non-JSON-LD <script>: keep `application/ld+json` only.
+    def _drop_script(m: re.Match[str]) -> str:
+        opening = m.group(0).split(">", 1)[0]
+        if 'application/ld+json' in opening:
+            return m.group(0)
+        return ""
+    html = re.sub(r"<script\b[^>]*>.*?</script>", _drop_script, html, flags=re.DOTALL)
     html = re.sub(r"<iframe\b[^>]*>.*?</iframe>", "", html, flags=re.DOTALL)
     out_path.write_text(html)
     print(f"  {out_path.name}: {len(html)} chars")
@@ -64,12 +68,17 @@ def main() -> None:
         if src.exists():
             sanitize_kwork(src, FIXTURES_CLEAN / f"kwork_c{cat}.sanitized.json")
 
-    print("\nSanitizing FL.ru HTML:")
+    print("\nSanitizing FL.ru listing HTML:")
     src = FIXTURES_RAW / "flru_programming_p1.html"
     if src.exists():
         sanitize_flru(
             src, FIXTURES_CLEAN / "flru_programming_p1.sanitized.html"
         )
+
+    print("\nSanitizing FL.ru order detail HTML:")
+    src = FIXTURES_RAW / "flru_order_page.html"
+    if src.exists():
+        sanitize_flru(src, FIXTURES_CLEAN / "flru_order_page.sanitized.html")
 
 
 if __name__ == "__main__":

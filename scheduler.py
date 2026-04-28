@@ -6,6 +6,7 @@ import logging
 from config import Settings
 from db import Database
 from exchanges import Exchange, Order
+from exchanges.flru import FLRuExchange
 from llm import LLMClient
 from logging_setup import bind_cycle, bind_order, reset_cycle, reset_order
 from notifier import TelegramNotifier
@@ -145,6 +146,22 @@ class Scheduler:
                 prefilter_skipped += 1
                 continue
 
+            description = order.description
+            # FL.ru listing only shows ~150-char preview; pull the full text
+            # before scoring so the LLM doesn't judge blind. We do this only
+            # AFTER prefilter to limit detail-page traffic to the funnel.
+            if isinstance(exchange, FLRuExchange):
+                full = await exchange.fetch_full_description(order.url)
+                if full and len(full) > len(description) + 50:
+                    description = full
+                    order.description = full
+                    try:
+                        await self.db.update_description(order.url, full)
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist full description for %s", order.url
+                        )
+
             relevance = 0
             order_token = bind_order(order.url)
             try:
@@ -152,7 +169,7 @@ class Scheduler:
                 relevance = await self.llm.score_relevance(
                     skills=self.settings.my_skills,
                     title=order.title,
-                    description=order.description,
+                    description=description,
                 )
             except Exception:
                 llm_errors += 1

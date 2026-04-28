@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from typing import Optional
@@ -44,11 +45,13 @@ class FLRuExchange(Exchange):
         cookies: str = "",
         max_pages: int = 10,
         page_concurrency: int = 3,
+        detail_concurrency: int = 5,
     ) -> None:
         self.http = http
         self.cookies = cookies
         self.max_pages = max(1, max_pages)
         self._page_sem = asyncio.Semaphore(max(1, page_concurrency))
+        self._detail_sem = asyncio.Semaphore(max(1, detail_concurrency))
         self._age_minutes_by_url: dict[str, int] = {}
 
     def debug_context(self) -> str:
@@ -120,6 +123,32 @@ class FLRuExchange(Exchange):
             async with response:
                 response.raise_for_status()
                 return await response.text()
+
+    async def fetch_full_description(self, order_url: str) -> Optional[str]:
+        """GET the order's detail page and pull the full description.
+
+        Returns None on parse / network failure (caller should keep using the
+        listing-page preview in that case). Concurrency is limited by
+        _detail_sem so we don't hammer fl.ru with 100+ concurrent GETs.
+        """
+        async with self._detail_sem:
+            headers = {"Accept-Language": "ru,en;q=0.9"}
+            if self.cookies:
+                headers["Cookie"] = self.cookies
+            try:
+                response = await self.http.request_with_retry(
+                    "GET", order_url, headers=headers
+                )
+                async with response:
+                    response.raise_for_status()
+                    html_text = await response.text()
+            except Exception as exc:
+                logger.warning(
+                    "FL.ru full description fetch failed for %s: %r", order_url, exc
+                )
+                return None
+
+        return parse_flru_full_description(html_text)
 
 
 # --- Pure parsing helpers (no IO) — easy to unit-test against fixtures ---
@@ -222,3 +251,60 @@ def _parse_age_snippet(snippet: str) -> Optional[int]:
 
 def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def parse_flru_full_description(html_text: str) -> Optional[str]:
+    """Extract the full description from an fl.ru order detail page.
+
+    Strategy:
+    1. Prefer schema.org JSON-LD <script type="application/ld+json"> with
+       @type=Product.description — most stable, doesn't depend on CSS classes.
+    2. Fallback to div.fl-project-content__description-text.
+    3. Returns None if neither yields anything; caller keeps the listing
+       preview.
+    """
+    tree = HTMLParser(html_text)
+
+    for script in tree.css('script[type="application/ld+json"]'):
+        raw = script.text() or ""
+        if not raw.strip():
+            continue
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        for entry in _iter_jsonld(data):
+            if (
+                isinstance(entry, dict)
+                and entry.get("@type") == "Product"
+                and isinstance(entry.get("description"), str)
+            ):
+                desc = entry["description"].strip()
+                if len(desc) >= 50:
+                    return _normalize_paragraphs(desc)
+
+    css_node = tree.css_first("div.fl-project-content__description-text")
+    if css_node is not None:
+        text = css_node.text(strip=True)
+        if len(text) >= 50:
+            return _normalize_paragraphs(text)
+
+    return None
+
+
+def _iter_jsonld(node):
+    """JSON-LD may be a single object, a list, or wrapped in @graph."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _iter_jsonld(item)
+    elif isinstance(node, dict):
+        yield node
+        for child in node.get("@graph", []) or []:
+            yield from _iter_jsonld(child)
+
+
+def _normalize_paragraphs(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
