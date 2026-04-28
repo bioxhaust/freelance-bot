@@ -14,7 +14,6 @@ from aiogram.types import (
 
 from exchanges import Order
 
-
 _DESC_LIMIT = 700
 _TG_MSG_LIMIT = 3500
 _PLACEHOLDER_VALUES = frozenset(

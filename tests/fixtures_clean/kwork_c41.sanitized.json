@@ -1,0 +1,51 @@
+{
+  "success": true,
+  "data": {
+    "pagination": {
+      "data": [
+        {
+          "id": 3164055,
+          "name": "Починить гугл скритп",
+          "description": "Есть гугл скрипт, что достает данные из wildberries, прошлый исполнитель куда-то исчез и нужно починить, выгрузку воронки и рекламный кабинет.\r\nЖду ваши предложения, цена не окончательная.",
+          "priceLimit": "500.00",
+          "max_days": "10",
+          "category_id": "41",
+          "date_create": "2026-04-28 21:07:24",
+          "user": {
+            "USERID": 100000,
+            "username": "user_anon_0",
+            "profilepicture": ""
+          }
+        },
+        {
+          "id": 3164024,
+          "name": "Работа в бразуере на запросах",
+          "description": "Требуется  прокси, войти на сайт, привязать номер (апи) и почту подтвердить.\r\n Срок 1 день \r\nЕсли сможете - пишите",
+          "priceLimit": "1000.00",
+          "max_days": "10",
+          "category_id": "41",
+          "date_create": "2026-04-28 20:26:34",
+          "user": {
+            "USERID": 100001,
+            "username": "user_anon_1",
+            "profilepicture": ""
+          }
+        },
+        {
+          "id": 3159275,
+          "name": "Плагин OpenCart для работы с S3",
+          "description": "нужно написать плагин OpenCart 3 для работы с S3 -- чтобы забирал картинки товаров из объектного хранилища",
+          "priceLimit": "1000.00",
+          "max_days": "10",
+          "category_id": "41",
+          "date_create": "2026-04-23 13:07:56",
+          "user": {
+            "USERID": 100002,
+            "username": "user_anon_2",
+            "profilepicture": ""
+          }
+        }
+      ]
+    }
+  }
+}

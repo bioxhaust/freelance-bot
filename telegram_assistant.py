@@ -14,6 +14,7 @@ from config import Settings
 from db import Database
 from exchanges import Order
 from llm import LLMClient
+from logging_setup import bind_order, reset_order
 from notifier import TelegramNotifier
 from runtime_state import RuntimeState
 
@@ -230,6 +231,19 @@ class TelegramAssistant:
             await query.answer("Этот заказ не найден в базе")
             return
 
+        order_token = bind_order(order_url)
+        try:
+            await self._dispatch_callback_action(action, query, message, order)
+        finally:
+            reset_order(order_token)
+
+    async def _dispatch_callback_action(
+        self,
+        action: str,
+        query: CallbackQuery,
+        message: Message,
+        order: Order,
+    ) -> None:
         if message.message_id in self._finalised_message_ids and action != "why":
             await query.answer("Уже завершено")
             return

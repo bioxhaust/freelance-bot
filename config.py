@@ -35,6 +35,8 @@ class Settings:
     kwork_cookies: str
     kwork_categories: tuple[int, ...]
     flru_cookies: str
+    cleanup_max_age_days: int
+    cleanup_every_cycles: int
 
 
 def _require(name: str) -> str:
@@ -119,4 +121,6 @@ def load_settings() -> Settings:
         kwork_cookies=os.getenv("KWORK_COOKIES", ""),
         kwork_categories=_int_tuple("KWORK_CATEGORIES", (41, 11, 45)),
         flru_cookies=os.getenv("FLRU_COOKIES", ""),
+        cleanup_max_age_days=_bounded_int("CLEANUP_MAX_AGE_DAYS", 30, lo=0, hi=365),
+        cleanup_every_cycles=_bounded_int("CLEANUP_EVERY_CYCLES", 60, lo=1, hi=10000),
     )

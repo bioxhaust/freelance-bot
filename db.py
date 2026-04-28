@@ -10,6 +10,7 @@ from exchanges import Order
 
 logger = logging.getLogger(__name__)
 
+
 SCHEMA_VERSION = 2
 
 _REQUIRED_COLUMNS = frozenset(
@@ -294,6 +295,32 @@ class Database:
             )
             for r in rows
         ]
+
+    async def cleanup_old(self, *, max_age_days: int) -> int:
+        """Delete orders older than N days that the user never marked applied.
+        Applied (kept-for-history) orders are never deleted.
+
+        Returns: number of rows deleted.
+        """
+        if max_age_days <= 0:
+            return 0
+        async with self.conn.execute(
+            f"""
+            DELETE FROM orders
+            WHERE applied = 0
+              AND created_at < datetime('now','-{int(max_age_days)} days')
+            """
+        ) as cur:
+            deleted = cur.rowcount
+        if deleted > 0:
+            logger.info(
+                "cleanup_old: deleted %d unapplied orders older than %d days",
+                deleted, max_age_days,
+            )
+        return int(deleted or 0)
+
+    async def vacuum(self) -> None:
+        await self.conn.execute("VACUUM")
 
     async def applied_today(self, limit: int = 10) -> list[Order]:
         async with self.conn.execute(

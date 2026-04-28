@@ -19,7 +19,7 @@ class RuntimeState:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @classmethod
-    def from_settings(cls, threshold: int) -> "RuntimeState":
+    def from_settings(cls, threshold: int) -> RuntimeState:
         return cls(paused=False, relevance_threshold=int(threshold))
 
     async def set_paused(self, value: bool) -> None:

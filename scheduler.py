@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 from config import Settings
 from db import Database
 from exchanges import Exchange, Order
 from llm import LLMClient
+from logging_setup import bind_cycle, bind_order, reset_cycle, reset_order
 from notifier import TelegramNotifier
 from runtime_state import RuntimeState
 
@@ -35,6 +35,7 @@ class Scheduler:
         self.runtime = runtime
         self.last_cycle_seconds: float = 0.0
         self.last_cycle_started_at: float = 0.0
+        self._cycles_since_cleanup = 0
 
     async def run_forever(self) -> None:
         cycle = 0
@@ -43,17 +44,33 @@ class Scheduler:
             if self.runtime.paused:
                 logger.info("Cycle %s skipped (paused)", cycle)
             else:
-                logger.info("Cycle %s started (threshold=%d)", cycle, self.runtime.relevance_threshold)
-                started = asyncio.get_event_loop().time()
-                self.last_cycle_started_at = started
-                await self.run_once()
-                self.last_cycle_seconds = asyncio.get_event_loop().time() - started
+                token = bind_cycle(cycle)
+                try:
+                    logger.info(
+                        "Cycle started (threshold=%d)", self.runtime.relevance_threshold
+                    )
+                    started = asyncio.get_event_loop().time()
+                    self.last_cycle_started_at = started
+                    await self.run_once()
+                    self.last_cycle_seconds = (
+                        asyncio.get_event_loop().time() - started
+                    )
+                finally:
+                    reset_cycle(token)
                 logger.info(
-                    "Cycle %s finished in %.1fs, sleep %ss",
-                    cycle,
+                    "Cycle finished in %.1fs, sleep %ss",
                     self.last_cycle_seconds,
                     self.settings.poll_interval_seconds,
                 )
+                self._cycles_since_cleanup += 1
+                if self._cycles_since_cleanup >= self.settings.cleanup_every_cycles:
+                    self._cycles_since_cleanup = 0
+                    try:
+                        await self.db.cleanup_old(
+                            max_age_days=self.settings.cleanup_max_age_days
+                        )
+                    except Exception:
+                        logger.exception("cleanup_old failed")
             await asyncio.sleep(self.settings.poll_interval_seconds)
 
     async def run_once(self) -> None:
@@ -129,6 +146,7 @@ class Scheduler:
                 continue
 
             relevance = 0
+            order_token = bind_order(order.url)
             try:
                 llm_calls += 1
                 relevance = await self.llm.score_relevance(
@@ -138,7 +156,9 @@ class Scheduler:
                 )
             except Exception:
                 llm_errors += 1
-                logger.exception("LLM relevance scoring failed for %s", order.url)
+                logger.exception("LLM relevance scoring failed")
+            finally:
+                reset_order(order_token)
             relevance_sum += relevance
 
             await self.db.update_relevance(order.url, relevance)

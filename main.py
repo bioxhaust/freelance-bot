@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from config import load_settings
 from db import Database
 from exchanges import FLRuExchange, KworkExchange
 from http_client import HttpClient
 from llm import LLMClient
+from logging_setup import setup_logging
 from notifier import TelegramNotifier
 from runtime_state import RuntimeState
 from scheduler import Scheduler
@@ -75,8 +75,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
+    import os
+
+    setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
     asyncio.run(main())

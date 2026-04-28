@@ -121,7 +121,10 @@ def check_notifier() -> None:
 
 def check_llm_score() -> None:
     from llm import (
-        _clamp_score, _parse_score_fallback, _parse_score_json, _smart_truncate,
+        _clamp_score,
+        _parse_score_fallback,
+        _parse_score_json,
+        _smart_truncate,
     )
 
     # Adversarial cases for the bug we fixed (last bounded number wins).
@@ -154,6 +157,7 @@ def check_config() -> None:
     os.environ["KWORK_CATEGORIES"] = "41,11,abc,99"
 
     import importlib
+
     import config as cfg_mod
     importlib.reload(cfg_mod)
     s = cfg_mod.load_settings()
@@ -166,6 +170,7 @@ def check_config() -> None:
 def check_kwork_parser() -> None:
     """Replay kwork fetch_orders against fixture JSON without HTTP."""
     from datetime import datetime, timezone
+
     from exchanges import Order
 
     items: list[dict] = []
@@ -310,6 +315,7 @@ async def check_db_extended() -> None:
     """Validate stats/top_unhandled/applied_today against a temp DB."""
     import os
     import tempfile
+
     from db import Database
     from exchanges import Order
 

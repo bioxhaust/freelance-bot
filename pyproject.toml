@@ -1,0 +1,44 @@
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+exclude = [
+    ".venv",
+    "tests/fixtures",
+    "tests/fixtures_clean",
+]
+
+[tool.ruff.lint]
+# Default Pyflakes (F) + pycodestyle errors (E), plus a few easy wins:
+# I = import sort, B = bugbear, UP = pyupgrade, ASYNC = asyncio pitfalls.
+select = ["F", "E", "W", "I", "B", "UP", "ASYNC"]
+ignore = [
+    "E501",   # long lines: we already enforce via line-length
+    "B008",   # function calls in default args (we use it for dataclass field)
+    "UP007",  # X | Y union syntax — we run on 3.9 in venv
+    "UP006",  # PEP 585 (list/dict generics) — same reason
+    "UP045",  # `X | None` over `Optional[X]` — same reason
+    "UP035",  # deprecated typing imports — same reason
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+"_smoke.py" = ["B011"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+strict_equality = true
+ignore_missing_imports = true
+exclude = [
+    "\\.venv/",
+    "tests/fixtures/",
+    "tests/fixtures_clean/",
+]
+
+[[tool.mypy.overrides]]
+module = ["selectolax.*", "cachetools.*", "aiosqlite.*"]
+ignore_missing_imports = true
