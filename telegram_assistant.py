@@ -7,7 +7,11 @@ import re
 from typing import Optional
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramConflictError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
 from aiogram.types import CallbackQuery, Message, Update
 
 from config import Settings
@@ -101,6 +105,12 @@ class TelegramAssistant:
             except TelegramRetryAfter as exc:
                 logger.warning("Telegram rate-limit, sleeping %.1fs", exc.retry_after)
                 await asyncio.sleep(exc.retry_after)
+            except TelegramNetworkError as exc:
+                # Routine network blips on long-poll: connection reset, DNS
+                # hiccup, etc. Don't spam stack traces — one short warning
+                # and a quick retry.
+                logger.warning("Telegram network blip: %s", exc)
+                await asyncio.sleep(3)
             except Exception:
                 logger.exception("Telegram assistant loop failed")
                 await asyncio.sleep(3)
