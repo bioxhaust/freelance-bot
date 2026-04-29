@@ -1,0 +1,26 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+.env
+*.db
+*.db-wal
+*.db-shm
+*.db.bak.*
+
+.git/
+.github/
+.idea/
+.vscode/
+.DS_Store
+
+# Raw fixtures (sanitized ones in fixtures_clean/ are kept for tests).
+tests/fixtures/
+
+# Local-only build artefacts.
+docs/
+README.md
+LICENSE
+*.log
