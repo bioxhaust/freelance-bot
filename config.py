@@ -25,6 +25,9 @@ class Settings:
     telegram_bot_token: str
     telegram_chat_id: str
     ollama_api_key: str
+    # Primary key first, then spare accounts. The spare is used only after
+    # the primary reports that its credits are gone.
+    ollama_api_keys: tuple[str, ...]
     ollama_model: str
     my_skills: str
     prefilter_include_keywords: list[str]
@@ -93,11 +96,24 @@ def _bounded_int(name: str, default: int, *, lo: int, hi: int) -> int:
     return value
 
 
+def _ollama_api_keys() -> tuple[str, ...]:
+    keys: list[str] = []
+    for name in ("OLLAMA_API_KEY", "OLLAMA_API_KEY_2"):
+        value = os.getenv(name, "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    if not keys:
+        raise ValueError("Missing required env var: OLLAMA_API_KEY")
+    return tuple(keys)
+
+
 def load_settings() -> Settings:
+    ollama_keys = _ollama_api_keys()
     return Settings(
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_require("TELEGRAM_CHAT_ID"),
-        ollama_api_key=_require("OLLAMA_API_KEY"),
+        ollama_api_key=ollama_keys[0],
+        ollama_api_keys=ollama_keys,
         ollama_model=os.getenv("OLLAMA_MODEL", "gpt-oss:120b"),
         my_skills=_require("MY_SKILLS"),
         prefilter_include_keywords=_csv_list(

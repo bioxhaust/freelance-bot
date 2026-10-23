@@ -61,7 +61,13 @@ async def main(apply: bool, threshold: int, max_count: int | None) -> None:
 
     http = HttpClient()
     flru = FLRuExchange(http=http, cookies=settings.flru_cookies, detail_concurrency=3)
-    llm = LLMClient(api_key=settings.ollama_api_key, model=settings.ollama_model, http=http)
+    llm = LLMClient(
+        api_key=settings.ollama_api_key,
+        model=settings.ollama_model,
+        http=http,
+        api_keys=list(settings.ollama_api_keys),
+    )
+    await llm.prefer_funded_account()
 
     started = time.time()
     upgraded = 0

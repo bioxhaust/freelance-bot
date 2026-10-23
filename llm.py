@@ -15,11 +15,79 @@ from http_client import HttpClient
 logger = logging.getLogger(__name__)
 
 OLLAMA_CLOUD_URL = "https://ollama.com/api/chat"
+OLLAMA_BALANCE_URL = "https://ollama.com/api/balance"
 
 _DEFAULT_DRAFT_CACHE_TTL = 30 * 60  # 30 minutes
 _DEFAULT_DRAFT_CACHE_SIZE = 256
 _DEFAULT_SCORE_CACHE_TTL = 60 * 60  # 1 hour
 _DEFAULT_SCORE_CACHE_SIZE = 512
+
+_CREDIT_MARKERS = (
+    "credit",
+    "quota",
+    "insufficient",
+    "billing",
+    "payment",
+    "usage limit",
+)
+
+
+class AccountBalance:
+    """What we could learn from GET /api/balance. usd is None when the shape is unknown."""
+
+    def __init__(self, usd: Optional[float], empty: bool) -> None:
+        self.usd = usd
+        self.empty = empty
+
+
+def read_account_balance(payload: object) -> AccountBalance:
+    if not isinstance(payload, dict):
+        return AccountBalance(usd=None, empty=False)
+    included = payload.get("included")
+    purchased = payload.get("purchased")
+    included = included if isinstance(included, dict) else {}
+    purchased = purchased if isinstance(purchased, dict) else {}
+    purchased_usd = _usd(purchased.get("balance_usd"))
+    if "balance_usd" in included:
+        included_usd = _usd(included.get("balance_usd"))
+        if included_usd is None:
+            return AccountBalance(usd=None, empty=False)
+        total = included_usd + (purchased_usd or 0.0)
+        return AccountBalance(usd=total, empty=total <= 0)
+    session = _remaining_percent(included.get("session"))
+    weekly = _remaining_percent(included.get("weekly"))
+    if session is None and weekly is None:
+        return AccountBalance(usd=None, empty=False)
+    if (purchased_usd or 0.0) > 0:
+        return AccountBalance(usd=purchased_usd, empty=False)
+    empty = (session or 0) <= 0 and (weekly or 0) <= 0
+    return AccountBalance(usd=None, empty=empty)
+
+
+def response_means_out_of_credits(status: int, body: str) -> bool:
+    """True when this account cannot pay for another request."""
+    if status == 402:
+        return True
+    if status not in (401, 403, 429):
+        return False
+    text = (body or "").lower()
+    return any(marker in text for marker in _CREDIT_MARKERS)
+
+
+def _usd(raw: object) -> Optional[float]:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _remaining_percent(block: object) -> Optional[float]:
+    if not isinstance(block, dict) or "remaining_percent" not in block:
+        return None
+    value = _usd(block.get("remaining_percent"))
+    return value
 
 
 class LLMClient:
@@ -29,10 +97,19 @@ class LLMClient:
         model: str,
         http: Optional[HttpClient] = None,
         *,
+        api_keys: Optional[list[str]] = None,
         draft_cache_ttl: int = _DEFAULT_DRAFT_CACHE_TTL,
         score_cache_ttl: int = _DEFAULT_SCORE_CACHE_TTL,
     ) -> None:
-        self.api_key = api_key
+        ordered: list[str] = []
+        for candidate in list(api_keys or []) + [api_key]:
+            text = (candidate or "").strip()
+            if text and text not in ordered:
+                ordered.append(text)
+        if not ordered:
+            raise ValueError("Ollama API key is empty")
+        self._api_keys = ordered
+        self._key_index = 0
         self.model = model
         self.http = http or HttpClient(total_timeout=90.0, sock_read=80.0)
         # TTL caches: key is a hash of (skills, title, description, action, ...).
@@ -47,6 +124,52 @@ class LLMClient:
         self._cache_lock = asyncio.Lock()
         self.cache_hits = 0
         self.cache_misses = 0
+
+    @property
+    def api_key(self) -> str:
+        return self._api_keys[self._key_index]
+
+    async def prefer_funded_account(self) -> None:
+        """Stay on the primary key until its balance is actually empty."""
+        count = len(self._api_keys)
+        if count < 2:
+            logger.info("Ollama accounts configured: 1")
+            return
+        logger.info("Ollama accounts configured: %s", count)
+        balance = await self._account_balance(self._api_keys[0])
+        if balance.usd is not None:
+            logger.info("Primary Ollama balance: $%.2f", balance.usd)
+        if not balance.empty:
+            if balance.usd is None:
+                logger.warning(
+                    "Could not read the primary Ollama balance, keeping account 1"
+                )
+            return
+        self._key_index = 1
+        logger.warning(
+            "Primary Ollama account has no credits, using account 2 of %s", count
+        )
+
+    async def _account_balance(self, api_key: str) -> AccountBalance:
+        headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+        try:
+            response = await self.http.request_with_retry(
+                "GET",
+                OLLAMA_BALANCE_URL,
+                headers=headers,
+                max_attempts=2,
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning("Ollama balance request failed: %r", exc)
+            return AccountBalance(usd=None, empty=False)
+        async with response:
+            if response.status >= 400:
+                return AccountBalance(usd=None, empty=False)
+            try:
+                payload = await response.json(content_type=None)
+            except (aiohttp.ContentTypeError, json.JSONDecodeError, ValueError):
+                return AccountBalance(usd=None, empty=False)
+        return read_account_balance(payload)
 
     async def score_relevance(self, skills: str, title: str, description: str) -> int:
         cache_key = _hash_key("score", skills, title, description)
@@ -217,18 +340,31 @@ class LLMClient:
         if response_format == "json":
             payload["format"] = "json"
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        response = await self.http.request_with_retry(
-            "POST", OLLAMA_CLOUD_URL, json=payload, headers=headers
-        )
-        async with response:
-            response.raise_for_status()
-            data = await response.json()
-        return data["message"]["content"]
+        for index in range(self._key_index, len(self._api_keys)):
+            headers = {
+                "Authorization": f"Bearer {self._api_keys[index]}",
+                "Content-Type": "application/json",
+            }
+            response = await self.http.request_with_retry(
+                "POST", OLLAMA_CLOUD_URL, json=payload, headers=headers
+            )
+            async with response:
+                if response.status >= 400:
+                    body = await response.text()
+                    spare_left = index + 1 < len(self._api_keys)
+                    if spare_left and response_means_out_of_credits(response.status, body):
+                        self._key_index = index + 1
+                        logger.warning(
+                            "Ollama account %s/%s is out of credits, switching to the next account",
+                            index + 1,
+                            len(self._api_keys),
+                        )
+                        continue
+                    response.raise_for_status()
+                data = await response.json()
+            self._key_index = index
+            return data["message"]["content"]
+        raise aiohttp.ClientError("Ollama accounts are out of credits")
 
 
 # Bump when the draft instructions change so a long-running process does not
