@@ -80,9 +80,10 @@ def test_render_includes_relevance_marker() -> None:
     assert "· 87%" in rendered
 
 
-def test_render_card_under_telegram_limit() -> None:
+def test_long_draft_keeps_pre_closed() -> None:
     rendered = render_order_card(_nasty_order(), 87, "X" * 5000)
-    assert len(rendered) <= 4000  # leaves headroom under 4096
+    assert len(rendered) > 3500
+    assert rendered.count("<pre>") == rendered.count("</pre>") == 1
 
 
 def test_actions_keyboard_no_draft_layout() -> None:

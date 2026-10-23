@@ -258,10 +258,9 @@ def render_order_card(order: Order, relevance: int, draft_reply: str) -> str:
         lines.append("")
         lines.append(f'<a href="{safe_url}">Открыть заказ</a>')
 
-    text = "\n".join(lines)
-    if len(text) > _TG_MSG_LIMIT:
-        text = text[: _TG_MSG_LIMIT - 1] + "…"
-    return text
+    # Do not slice the finished HTML. A cut in the middle of <pre> makes
+    # Telegram reject the message. send_order splits a long draft instead.
+    return "\n".join(lines)
 
 
 def build_actions_keyboard(
