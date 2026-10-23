@@ -195,6 +195,7 @@ def parse_flru_listing(html_text: str) -> list[tuple[Order, Optional[int]]]:
             price = _clean(price_node.text(strip=True)) or price
 
         age = _extract_age_minutes_from_card(card)
+        offers = _extract_offers_count(card)
 
         out.append(
             (
@@ -206,11 +207,28 @@ def parse_flru_listing(html_text: str) -> list[tuple[Order, Optional[int]]]:
                     client="не указан",
                     source=FLRuExchange.source_name,
                     url=url,
+                    offers_count=offers,
                 ),
                 age,
             )
         )
     return out
+
+
+_REPLIES_RE = re.compile(r"(\d+)\s*ответ", re.IGNORECASE)
+
+
+def _extract_offers_count(card: Node) -> Optional[int]:
+    node = card.css_first("span[data-id='fl-view-count-href']")
+    if node is None:
+        node = card.css_first("svg[title='Количество ответов']")
+    if node is None:
+        return None
+    snippet = node.text(strip=True).lower().replace("\xa0", " ")
+    match = _REPLIES_RE.search(snippet)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def _extract_age_minutes_from_card(card: Node) -> Optional[int]:

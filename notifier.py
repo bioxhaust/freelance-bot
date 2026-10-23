@@ -30,15 +30,33 @@ class TelegramNotifier:
         self, order: Order, relevance: int, draft_reply: str = ""
     ) -> Optional[Message]:
         text = render_order_card(order, relevance, draft_reply)
-        return await self.bot.send_message(
+        if len(text) <= _TG_MSG_LIMIT:
+            return await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=build_actions_keyboard(
+                    order.url, has_draft=bool(draft_reply)
+                ),
+            )
+        # FL.ru drafts are up to 5000 characters and do not fit next to the card.
+        note = (
+            f"\n\n<b>✏️ Черновик отклика</b> · {len(draft_reply)} символов\n"
+            "Полный текст ниже, его можно копировать."
+        )
+        card = render_order_card(order, relevance, "") + note
+        if len(card) > _TG_MSG_LIMIT:
+            card = card[: _TG_MSG_LIMIT - 1] + "…"
+        message = await self.bot.send_message(
             chat_id=self.chat_id,
-            text=text,
+            text=card,
             parse_mode="HTML",
             disable_web_page_preview=True,
-            reply_markup=build_actions_keyboard(
-                order.url, has_draft=bool(draft_reply)
-            ),
+            reply_markup=build_actions_keyboard(order.url, has_draft=True),
         )
+        await self._send_draft_chunks(draft_reply, reply_to=message.message_id)
+        return message
 
     async def update_card(
         self,
@@ -51,6 +69,15 @@ class TelegramNotifier:
     ) -> None:
         """Re-render the card (used to swap draft text and clear/set tone submenu)."""
         new_text = render_order_card(order, relevance, draft_reply)
+        overflow = len(new_text) > _TG_MSG_LIMIT and bool(draft_reply)
+        if overflow:
+            note = (
+                f"\n\n<b>✏️ Черновик отклика</b> · {len(draft_reply)} символов\n"
+                "Полный текст ниже, его можно копировать."
+            )
+            new_text = render_order_card(order, relevance, "") + note
+            if len(new_text) > _TG_MSG_LIMIT:
+                new_text = new_text[: _TG_MSG_LIMIT - 1] + "…"
         if keyboard is None:
             keyboard = build_actions_keyboard(order.url, has_draft=bool(draft_reply))
         try:
@@ -68,6 +95,19 @@ class TelegramNotifier:
                     pass
                 return
             raise
+        if overflow:
+            await self._send_draft_chunks(draft_reply, reply_to=message.message_id)
+
+    async def _send_draft_chunks(self, draft: str, *, reply_to: int) -> None:
+        for chunk in _split_text(draft, 3500):
+            safe = _esc(chunk)
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"<pre>{safe}</pre>",
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_to_message_id=reply_to,
+            )
 
     async def show_tone_submenu(self, message: Message, order: Order) -> None:
         try:
@@ -201,6 +241,8 @@ def render_order_card(order: Order, relevance: int, draft_reply: str) -> str:
         lines.append(f"👤 {client}")
     elif hire:
         lines.append(f"👤 {hire}")
+    if order.offers_count is not None:
+        lines.append(f"✉️ {_offers_phrase(order.offers_count)}")
     lines.append("")
     if desc:
         lines.append(desc)
@@ -286,6 +328,38 @@ def build_finalised_keyboard(order_url: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🌐 Открыть заказ", url=safe_url)]
         ]
     )
+
+
+def _offers_phrase(count: int) -> str:
+    n = abs(int(count))
+    tail = n % 100
+    if 11 <= tail <= 14:
+        word = "откликов"
+    elif tail % 10 == 1:
+        word = "отклик"
+    elif 2 <= tail % 10 <= 4:
+        word = "отклика"
+    else:
+        word = "откликов"
+    return f"{n} {word}"
+
+
+def _split_text(text: str, limit: int) -> list[str]:
+    parts: list[str] = []
+    rest = text.strip()
+    while rest:
+        if len(rest) <= limit:
+            parts.append(rest)
+            break
+        cut = rest[:limit]
+        nl = cut.rfind("\n")
+        if nl >= int(limit * 0.4):
+            parts.append(rest[:nl].rstrip())
+            rest = rest[nl + 1 :].lstrip("\n")
+            continue
+        parts.append(cut.rstrip())
+        rest = rest[limit:]
+    return [part for part in parts if part]
 
 
 def _esc(value: str | None) -> str:

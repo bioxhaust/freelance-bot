@@ -136,7 +136,35 @@ class LLMClient:
             max_chars=max_chars,
             style_hint=style_hint,
         )
-        draft = _smart_truncate(await self._chat(prompt), max_chars)
+        draft = fit_reply(await self._chat(prompt), max_chars)
+        # One expansion pass when the model ignored a long platform limit.
+        floor = int(max_chars * 0.6)
+        if (
+            max_chars >= 1500
+            and "короче" not in (style_hint or "")
+            and len(draft) < floor
+        ):
+            logger.info(
+                "Draft is short (%s/%s chars), asking for a fuller reply",
+                len(draft),
+                max_chars,
+            )
+            expand = (
+                f"{prompt}\n\n"
+                f"Предыдущий текст слишком короткий ({len(draft)} символов). "
+                f"Напиши заново цельный отклик длиной от {int(max_chars * 0.75)} "
+                f"до {max_chars} символов. Не повторяй воду.\n"
+                f"Короткий вариант был:\n{draft}\n"
+            )
+            draft = fit_reply(await self._chat(expand), max_chars)
+        if len(draft) > max_chars:
+            logger.error(
+                "Draft length check failed: %s > %s, hard cut",
+                len(draft),
+                max_chars,
+            )
+            draft = draft[:max_chars].rstrip()
+        logger.info("Draft length %s/%s chars", len(draft), max_chars)
         async with self._cache_lock:
             self._draft_cache[cache_key] = draft
         return draft
@@ -205,7 +233,7 @@ class LLMClient:
 
 # Bump when the draft instructions change so a long-running process does not
 # reuse replies written by the previous prompt.
-_DRAFT_PROMPT_VERSION = "approach-v1"
+_DRAFT_PROMPT_VERSION = "approach-v2-limits"
 
 
 def _build_draft_prompt(
@@ -237,7 +265,7 @@ def _build_draft_prompt(
         "С чего начну, что сделаю, что сдам на выходе. Шаги привяжи к "
         "формулировке заказа (функции, интеграции, ограничения), а не к общему "
         "шаблону «любой сайт / любой бот».\n"
-        "3) Одно предложение — следующий шаг: уточняющий вопрос по заказу или "
+        "3) Следующий шаг: один-два уточняющих вопроса по заказу или "
         "предложение начать.\n"
         "Требования:\n"
         "- без воды и без шаблонного пафоса;\n"
@@ -245,12 +273,25 @@ def _build_draft_prompt(
         "«большой опыт», «индивидуальный подход», «гарантирую результат»;\n"
         "- не придумывай факты, кейсы, сроки, цены и технологии, которых нет "
         "в навыках или в заказе;\n"
-        "- если деталей мало, строй план из того, что сказано, и в последнем "
-        "предложении напиши, что уточнишь;\n"
+        "- если в навыках перечислены репозитории GitHub, сошлись на один "
+        "подходящий и дай полную ссылку. Не упоминай репозитории вне списка;\n"
+        "- если деталей мало, строй план из того, что сказано, и в конце "
+        "напиши, что уточнишь;\n"
         "- если стиль просит короче, подход не выкидывай: сожми его до 2 шагов;\n"
         "- учитывай бюджет и срок, если они указаны: не обещай объём, который "
         "в них явно не помещается;\n"
-        f"- максимум {max_chars} символов.\n\n"
+        f"- максимум {max_chars} символов. Это жёсткий лимит площадки, "
+        "лишнее будет обрезано проверкой длины.\n"
+        + (
+            "- стиль просит короткий текст, уложись в этот потолок.\n"
+            if "короче" in tone
+            else (
+                f"- пиши развёрнуто и используй не меньше {max(1, int(max_chars * 0.75))} "
+                "символов: раскрой каждый шаг, что сделаешь, в каком порядке, "
+                "что сдашь на выходе. Не добивай лимит повторами.\n"
+            )
+        )
+        + "\n"
         f"Дополнительный стиль: {tone}.\n\n"
         f"Мои навыки:\n{skills}\n\n"
         f"Название заказа:\n{title}\n\n"
@@ -307,6 +348,16 @@ def _parse_score_fallback(text: str) -> int:
     if not candidates:
         return 0
     return candidates[-1]
+
+
+def fit_reply(text: str, limit: int) -> str:
+    """Cut a reply so len(result) <= limit. The exchange checker depends on this."""
+    if limit < 1:
+        return ""
+    fitted = _smart_truncate(text or "", limit)
+    if len(fitted) > limit:
+        fitted = fitted[:limit].rstrip()
+    return fitted
 
 
 def _smart_truncate(text: str, max_chars: int) -> str:

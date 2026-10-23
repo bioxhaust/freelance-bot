@@ -16,7 +16,9 @@ from aiogram.types import CallbackQuery, Message, Update
 
 from config import Settings
 from db import Database
+from draft_limits import draft_char_limit
 from exchanges import Order
+from github_profile import model_skills
 from llm import LLMClient
 from logging_setup import bind_order, reset_order
 from notifier import TelegramNotifier
@@ -158,9 +160,12 @@ class TelegramAssistant:
             await self._cmd_threshold(message, text)
             return
         if lowered in ("/skills",):
+            shown = model_skills(self.settings.my_skills)
+            if len(shown) > 3500:
+                shown = shown[:3499] + "…"
             await message.reply(
                 f"<b>Текущие навыки</b> (для LLM):\n<blockquote>"
-                f"{html.escape(self.settings.my_skills, quote=False)}</blockquote>",
+                f"{html.escape(shown, quote=False)}</blockquote>",
                 parse_mode="HTML",
             )
             return
@@ -185,7 +190,7 @@ class TelegramAssistant:
 
         if text == "почему":
             explanation = await self.llm.explain_relevance(
-                skills=self.settings.my_skills,
+                skills=model_skills(self.settings.my_skills),
                 title=order.title,
                 description=order.description,
             )
@@ -204,10 +209,11 @@ class TelegramAssistant:
                 "короче": "short",
                 "жестче": "tone_hard",
                 "дружелюбнее": "tone_friendly",
-            }[text]
+            }[text],
+            order.source,
         )
         draft = await self.llm.generate_reply_draft(
-            skills=self.settings.my_skills,
+            skills=model_skills(self.settings.my_skills),
             title=order.title,
             description=order.description,
             max_chars=max_chars,
@@ -295,7 +301,7 @@ class TelegramAssistant:
         if action == "why":
             await query.answer("Объясняю...")
             explanation = await self.llm.explain_relevance(
-                skills=self.settings.my_skills,
+                skills=model_skills(self.settings.my_skills),
                 title=order.title,
                 description=order.description,
             )
@@ -330,10 +336,10 @@ class TelegramAssistant:
         if not existing_draft:
             try:
                 draft_to_attach = await self.llm.generate_reply_draft(
-                    skills=self.settings.my_skills,
+                    skills=model_skills(self.settings.my_skills),
                     title=order.title,
                     description=order.description,
-                    max_chars=self.settings.draft_max_chars,
+                    max_chars=draft_char_limit(order.source),
                     price=order.price,
                     deadline=order.deadline,
                 )
@@ -380,10 +386,10 @@ class TelegramAssistant:
         action: str,
     ) -> None:
         await query.answer("Генерирую…")
-        style_hint, max_chars = self._style_for(action)
+        style_hint, max_chars = self._style_for(action, order.source)
         try:
             draft = await self.llm.generate_reply_draft(
-                skills=self.settings.my_skills,
+                skills=model_skills(self.settings.my_skills),
                 title=order.title,
                 description=order.description,
                 max_chars=max_chars,
@@ -407,21 +413,21 @@ class TelegramAssistant:
                 parse_mode="HTML",
             )
 
-    def _style_for(self, action: str) -> tuple[str, int]:
-        max_chars = self.settings.draft_max_chars
+    def _style_for(self, action: str, source: str) -> tuple[str, int]:
         if action == "short":
             return (
                 "короче обычного, но оставь сжатый план решения из 2 шагов",
-                min(500, max_chars),
+                draft_char_limit(source, short=True),
             )
         if action in _TONE_HINTS:
-            return (_TONE_HINTS[action], max_chars)
+            return (_TONE_HINTS[action], draft_char_limit(source))
+        limit = draft_char_limit(source)
         # Legacy callbacks from old keyboards
         if action == "hard":
-            return (_TONE_HINTS["tone_hard"], max_chars)
+            return (_TONE_HINTS["tone_hard"], limit)
         if action == "friendly":
-            return (_TONE_HINTS["tone_friendly"], max_chars)
-        return ("", max_chars)
+            return (_TONE_HINTS["tone_friendly"], limit)
+        return ("", limit)
 
     @staticmethod
     def _extract_order_url(text: str) -> Optional[str]:

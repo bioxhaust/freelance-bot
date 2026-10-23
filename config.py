@@ -40,6 +40,10 @@ class Settings:
     flru_cookies: str
     cleanup_max_age_days: int
     cleanup_every_cycles: int
+    # Orders younger than this are still scored after downtime.
+    # 0 disables the age gate (same as FRESH_ORDER_MAX_AGE_MINUTES=0).
+    backlog_max_age_minutes: int
+    llm_concurrency: int
 
 
 def _require(name: str) -> str:
@@ -126,4 +130,8 @@ def load_settings() -> Settings:
         flru_cookies=os.getenv("FLRU_COOKIES", ""),
         cleanup_max_age_days=_bounded_int("CLEANUP_MAX_AGE_DAYS", 30, lo=0, hi=365),
         cleanup_every_cycles=_bounded_int("CLEANUP_EVERY_CYCLES", 60, lo=1, hi=10000),
+        backlog_max_age_minutes=_bounded_int(
+            "BACKLOG_MAX_AGE_MINUTES", 180, lo=0, hi=60 * 24 * 7
+        ),
+        llm_concurrency=_bounded_int("LLM_CONCURRENCY", 3, lo=1, hi=8),
     )

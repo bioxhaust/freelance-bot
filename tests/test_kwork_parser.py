@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from exchanges.kwork import parse_kwork_hire_stats
+from exchanges.kwork import kwork_category_id, parse_kwork_hire_stats
 
 try:
     from zoneinfo import ZoneInfo
@@ -65,6 +65,13 @@ def test_kwork_url_and_price_format() -> None:
     price_limit = (item.get("priceLimit") or "").strip()
     price = f"{price_limit} RUB" if price_limit else "по договоренности"
     assert price.endswith("RUB") or price == "по договоренности"
+
+
+def test_kwork_category_id_accepts_string() -> None:
+    assert kwork_category_id("41") == 41
+    assert kwork_category_id(11) == 11
+    assert kwork_category_id("") is None
+    assert kwork_category_id(None) is None
 
 
 def test_parse_kwork_hire_stats() -> None:

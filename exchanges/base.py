@@ -19,6 +19,8 @@ class Order:
     # FL.ru does not publish an equivalent number.
     client_hire_percent: Optional[int] = None
     client_orders_count: Optional[int] = None
+    # How many bids are already on this project. Lower is easier to win.
+    offers_count: Optional[int] = None
 
     def hire_phrase(self) -> Optional[str]:
         """Short Russian label for the card, or None when the exchange has no stat."""

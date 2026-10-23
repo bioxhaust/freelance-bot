@@ -31,6 +31,13 @@ def test_parse_returns_cards(fixture_html: str) -> None:
     assert len(parsed) >= 25, f"Only {len(parsed)} cards parsed"
 
 
+def test_listing_reads_reply_counts(fixture_html: str) -> None:
+    parsed = parse_flru_listing(fixture_html)
+    counts = [order.offers_count for order, _ in parsed if order.offers_count is not None]
+    assert counts, "expected at least one reply count"
+    assert 4 in counts
+
+
 def test_every_card_has_url_and_title(fixture_html: str) -> None:
     parsed = parse_flru_listing(fixture_html)
     for order, _ in parsed:

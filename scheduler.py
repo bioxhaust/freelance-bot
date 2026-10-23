@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from dataclasses import dataclass
 
 from config import Settings
 from db import Database
+from draft_limits import draft_char_limit
 from exchanges import Exchange, Order
 from exchanges.flru import FLRuExchange
+from github_profile import model_skills
 from llm import LLMClient
 from logging_setup import bind_cycle, bind_order, reset_cycle, reset_order
 from notifier import TelegramNotifier
@@ -37,6 +41,7 @@ class Scheduler:
         self.last_cycle_seconds: float = 0.0
         self.last_cycle_started_at: float = 0.0
         self._cycles_since_cleanup = 0
+        self._llm_sem = asyncio.Semaphore(max(1, settings.llm_concurrency))
 
     async def run_forever(self) -> None:
         cycle = 0
@@ -107,107 +112,49 @@ class Scheduler:
             )
             return []
 
+    def _scoring_max_age(self) -> int:
+        """Minutes after which a never-seen order is recorded and not scored.
+
+        0 on either knob disables the gate. Otherwise the wider of the fresh
+        window and the backlog window is used, so a restart still scores
+        orders that appeared while the bot was down.
+        """
+        fresh = self.settings.fresh_order_max_age_minutes
+        backlog = self.settings.backlog_max_age_minutes
+        if fresh == 0 or backlog == 0:
+            return 0
+        return max(fresh, backlog)
+
     async def _process_orders(
         self, exchange: Exchange, orders: list[Order]
     ) -> None:
         fetched_count = len(orders)
-        new_count = 0
-        duplicates_count = 0
-        llm_calls = 0
-        llm_errors = 0
-        prefilter_skipped = 0
-        stale_skipped = 0
-        passed_threshold = 0
-        draft_errors = 0
-        notify_errors = 0
-        sent_count = 0
-        relevance_sum = 0
-
-        for idx, order in enumerate(orders, start=1):
-            if idx % 50 == 0:
-                logger.info(
-                    "%s progress: %d/%d processed (new=%d sent=%d)",
-                    exchange.source_name, idx, len(orders), new_count, sent_count,
-                )
-
-            inserted = await self.db.save_order_if_new(order, relevance=None)
-            if not inserted:
-                duplicates_count += 1
+        # Few existing bids and a buyer who actually hires go to the model first.
+        ranked = sorted(orders, key=lambda order: _priority(exchange, order))
+        tallies = await asyncio.gather(
+            *(self._handle_order(exchange, order) for order in ranked),
+            return_exceptions=True,
+        )
+        total = _Tally()
+        for item in tallies:
+            if isinstance(item, BaseException):
+                total.llm_errors += 1
+                logger.error("Order handler failed: %r", item)
                 continue
-            new_count += 1
+            total.add(item)
 
-            max_age = self.settings.fresh_order_max_age_minutes
-            age_minutes = exchange.order_age_minutes(order)
-            if max_age > 0 and age_minutes is not None and age_minutes > max_age:
-                stale_skipped += 1
-                continue
-
-            if not self._passes_prefilter(order.title, order.description):
-                prefilter_skipped += 1
-                continue
-
-            description = order.description
-            # FL.ru listing only shows ~150-char preview; pull the full text
-            # before scoring so the LLM doesn't judge blind. We do this only
-            # AFTER prefilter to limit detail-page traffic to the funnel.
-            if isinstance(exchange, FLRuExchange):
-                full = await exchange.fetch_full_description(order.url)
-                if full and len(full) > len(description) + 50:
-                    description = full
-                    order.description = full
-                    try:
-                        await self.db.update_description(order.url, full)
-                    except Exception:
-                        logger.exception(
-                            "Failed to persist full description for %s", order.url
-                        )
-
-            relevance = 0
-            order_token = bind_order(order.url)
-            try:
-                llm_calls += 1
-                relevance = await self.llm.score_relevance(
-                    skills=self.settings.my_skills,
-                    title=order.title,
-                    description=description,
-                )
-            except Exception:
-                llm_errors += 1
-                logger.exception("LLM relevance scoring failed")
-            finally:
-                reset_order(order_token)
-            relevance_sum += relevance
-
-            await self.db.update_relevance(order.url, relevance)
-
-            if relevance >= self.runtime.relevance_threshold:
-                passed_threshold += 1
-                draft_reply = ""
-                if self.settings.draft_mode:
-                    try:
-                        draft_reply = await self.llm.generate_reply_draft(
-                            skills=self.settings.my_skills,
-                            title=order.title,
-                            description=order.description,
-                            max_chars=self.settings.draft_max_chars,
-                            price=order.price,
-                            deadline=order.deadline,
-                        )
-                    except Exception:
-                        draft_errors += 1
-                        logger.exception("Draft generation failed for %s", order.url)
-                try:
-                    await self.notifier.send_order(
-                        order, relevance, draft_reply=draft_reply
-                    )
-                    sent_count += 1
-                except Exception:
-                    notify_errors += 1
-                    logger.exception(
-                        "Failed to send Telegram notification for %s", order.url
-                    )
-
-        avg_relevance = (relevance_sum / new_count) if new_count else 0.0
+        new_count = total.new
+        duplicates_count = total.duplicates
+        llm_calls = total.llm_calls
+        llm_errors = total.llm_errors
+        prefilter_skipped = total.prefilter_skipped
+        stale_skipped = total.stale_skipped
+        passed_threshold = total.passed
+        draft_errors = total.draft_errors
+        notify_errors = total.notify_errors
+        sent_count = total.sent
+        scored = max(0, llm_calls - llm_errors)
+        avg_relevance = (total.relevance_sum / scored) if scored else 0.0
         context = exchange.debug_context()
         source_label = (
             f"{exchange.source_name} ({context})" if context else exchange.source_name
@@ -246,14 +193,163 @@ class Scheduler:
                 preview,
             )
 
-    def _passes_prefilter(self, title: str, description: str) -> bool:
-        text = f"{title} {description}".lower()
+    async def _handle_order(self, exchange: Exchange, order: Order) -> _Tally:
+        tally = _Tally()
+        state = await self.db.pipeline_state(order.url)
+        if state in ("done", "skipped"):
+            tally.duplicates = 1
+            return tally
 
-        if self.settings.prefilter_exclude_keywords:
-            if any(word in text for word in self.settings.prefilter_exclude_keywords):
-                return False
+        max_age = self._scoring_max_age()
+        age_minutes = exchange.order_age_minutes(order)
+        if max_age > 0 and age_minutes is not None and age_minutes > max_age:
+            if state == "missing":
+                await self.db.save_order_if_new(order, relevance=None, skipped=True)
+            else:
+                await self.db.mark_skipped(order.url)
+            tally.stale_skipped = 1
+            return tally
 
-        if not self.settings.prefilter_include_keywords:
-            return True
+        if not passes_prefilter(
+            order.title,
+            order.description,
+            include=self.settings.prefilter_include_keywords,
+            exclude=self.settings.prefilter_exclude_keywords,
+        ):
+            # Leave it out of the DB so a later keyword edit can still match
+            # while the project is on the first pages.
+            tally.prefilter_skipped = 1
+            return tally
 
-        return any(word in text for word in self.settings.prefilter_include_keywords)
+        if state == "missing":
+            await self.db.save_order_if_new(order, relevance=None)
+        tally.new = 1
+
+        description = order.description
+        # FL.ru listing only shows a short preview; pull the full text
+        # before scoring so the LLM doesn't judge blind.
+        if isinstance(exchange, FLRuExchange):
+            full = await exchange.fetch_full_description(order.url)
+            if full and len(full) > len(description) + 50:
+                description = full
+                order.description = full
+                try:
+                    await self.db.update_description(order.url, full)
+                except Exception:
+                    logger.exception(
+                        "Failed to persist full description for %s", order.url
+                    )
+
+        skills = model_skills(self.settings.my_skills)
+        relevance = 0
+        order_token = bind_order(order.url)
+        async with self._llm_sem:
+            try:
+                tally.llm_calls = 1
+                relevance = await self.llm.score_relevance(
+                    skills=skills,
+                    title=order.title,
+                    description=description,
+                )
+            except Exception:
+                tally.llm_errors = 1
+                logger.exception("LLM relevance scoring failed")
+            else:
+                tally.relevance_sum = relevance
+                await self.db.update_relevance(order.url, relevance)
+                if relevance >= self.runtime.relevance_threshold:
+                    tally.passed = 1
+                    draft_reply = ""
+                    if self.settings.draft_mode:
+                        try:
+                            draft_reply = await self.llm.generate_reply_draft(
+                                skills=skills,
+                                title=order.title,
+                                description=order.description,
+                                max_chars=draft_char_limit(order.source),
+                                price=order.price,
+                                deadline=order.deadline,
+                            )
+                        except Exception:
+                            tally.draft_errors = 1
+                            logger.exception(
+                                "Draft generation failed for %s", order.url
+                            )
+                    try:
+                        await self.notifier.send_order(
+                            order, relevance, draft_reply=draft_reply
+                        )
+                        tally.sent = 1
+                    except Exception:
+                        tally.notify_errors = 1
+                        logger.exception(
+                            "Failed to send Telegram notification for %s", order.url
+                        )
+            finally:
+                reset_order(order_token)
+        return tally
+
+
+@dataclass
+class _Tally:
+    new: int = 0
+    duplicates: int = 0
+    llm_calls: int = 0
+    llm_errors: int = 0
+    prefilter_skipped: int = 0
+    stale_skipped: int = 0
+    passed: int = 0
+    draft_errors: int = 0
+    notify_errors: int = 0
+    sent: int = 0
+    relevance_sum: int = 0
+
+    def add(self, other: _Tally) -> None:
+        self.new += other.new
+        self.duplicates += other.duplicates
+        self.llm_calls += other.llm_calls
+        self.llm_errors += other.llm_errors
+        self.prefilter_skipped += other.prefilter_skipped
+        self.stale_skipped += other.stale_skipped
+        self.passed += other.passed
+        self.draft_errors += other.draft_errors
+        self.notify_errors += other.notify_errors
+        self.sent += other.sent
+        self.relevance_sum += other.relevance_sum
+
+
+def _priority(exchange: Exchange, order: Order) -> tuple[int, int, int]:
+    offers = order.offers_count if order.offers_count is not None else 10**9
+    hire = order.client_hire_percent if order.client_hire_percent is not None else -1
+    age = exchange.order_age_minutes(order)
+    age_key = age if age is not None else 10**9
+    return (offers, -hire, age_key)
+
+
+def passes_prefilter(
+    title: str,
+    description: str,
+    *,
+    include: list[str],
+    exclude: list[str],
+) -> bool:
+    text = f"{title} {description}".lower()
+    if exclude and any(keyword_matches(text, word) for word in exclude):
+        return False
+    if not include:
+        return True
+    return any(keyword_matches(text, word) for word in include)
+
+
+def keyword_matches(text: str, keyword: str) -> bool:
+    """Short tokens match on a word boundary so «бот» does not hit «работа».
+
+    Longer keywords and phrases stay substrings: «python» still matches
+    «python3», «telegram bot» still matches the phrase.
+    """
+    kw = keyword.strip().lower()
+    if not kw:
+        return False
+    if " " in kw or len(kw) > 4:
+        return kw in text
+    return re.search(rf"(?<!\w){re.escape(kw)}(?!\w)", text) is not None

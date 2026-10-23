@@ -188,3 +188,20 @@ async def test_hire_stats_survive_reload_and_old_schema() -> None:
         assert flru.hire_phrase() is None
     finally:
         await instance.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_retries_pending_and_skips_stale(db: Database) -> None:
+    fresh = _order(20)
+    fresh.offers_count = 3
+    assert await db.pipeline_state(fresh.url) == "missing"
+    await db.save_order_if_new(fresh, relevance=None)
+    assert await db.pipeline_state(fresh.url) == "pending"
+    loaded = await db.get_order_by_url(fresh.url)
+    assert loaded is not None and loaded.offers_count == 3
+
+    await db.mark_skipped(fresh.url)
+    assert await db.pipeline_state(fresh.url) == "skipped"
+
+    await db.update_relevance(fresh.url, 80)
+    assert await db.pipeline_state(fresh.url) == "done"

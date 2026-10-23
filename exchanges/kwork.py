@@ -49,17 +49,16 @@ class KworkExchange(Exchange):
         return max(0, int(delta.total_seconds() // 60))
 
     async def fetch_orders(self) -> list[Order]:
-        tasks = [
-            self._fetch_page(category_id, page)
-            for category_id in self.categories
-            for page in range(1, self.max_pages + 1)
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Page 1 tells us last_page, so we do not request empty pages.
+        results = await asyncio.gather(
+            *(self._fetch_category(category_id) for category_id in self.categories),
+            return_exceptions=True,
+        )
 
         items: list[dict] = []
         for result in results:
             if isinstance(result, BaseException):
-                logger.warning("Kwork page fetch failed: %r", result)
+                logger.warning("Kwork category fetch failed: %r", result)
                 continue
             items.extend(result)
 
@@ -84,18 +83,22 @@ class KworkExchange(Exchange):
             deadline = (item.get("max_days") or "").strip() or "не указан"
             client = (user.get("username") or "").strip() or "не указан"
             hire_percent, orders_count = parse_kwork_hire_stats(user)
+            offers_count = _stat_int(item.get("kwork_count"), hi=1_000_000)
             url = f"https://kwork.ru/projects/{order_id}/view"
             if url in seen_urls:
                 continue
             seen_urls.add(url)
 
-            actual_cat = item.get("category_id")
+            # category_id arrives as a string ("41"). Compare as int, and
+            # drop projects the feed mixed in from another category.
+            actual_cat = kwork_category_id(item.get("category_id"))
             if (
                 actual_cat is not None
                 and self.categories
                 and actual_cat not in self.categories
             ):
                 category_mismatches += 1
+                continue
 
             date_create = (item.get("date_create") or "").strip()
             if date_create:
@@ -118,6 +121,7 @@ class KworkExchange(Exchange):
                     url=url,
                     client_hire_percent=hire_percent,
                     client_orders_count=orders_count,
+                    offers_count=offers_count,
                 )
             )
 
@@ -130,7 +134,29 @@ class KworkExchange(Exchange):
         self._created_at_by_url = created_at_by_url
         return orders
 
-    async def _fetch_page(self, category_id: int, page: int) -> list[dict]:
+    async def _fetch_category(self, category_id: int) -> list[dict]:
+        items, last_page = await self._fetch_page(category_id, 1)
+        last_page = max(1, min(last_page, self.max_pages))
+        if last_page == 1:
+            return items
+        rest = await asyncio.gather(
+            *(
+                self._fetch_page(category_id, page)
+                for page in range(2, last_page + 1)
+            ),
+            return_exceptions=True,
+        )
+        for result in rest:
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Kwork page fetch failed for c=%s: %r", category_id, result
+                )
+                continue
+            page_items, _last = result
+            items.extend(page_items)
+        return items
+
+    async def _fetch_page(self, category_id: int, page: int) -> tuple[list[dict], int]:
         async with self._page_sem:
             headers = {
                 "Accept": "application/json, text/plain, */*",
@@ -151,8 +177,13 @@ class KworkExchange(Exchange):
                 response.raise_for_status()
                 payload = await response.json(content_type=None)
 
-        page_items = ((payload.get("data") or {}).get("pagination") or {}).get("data") or []
-        return page_items
+        pagination = ((payload.get("data") or {}).get("pagination") or {})
+        page_items = pagination.get("data") or []
+        try:
+            last_page = int(pagination.get("last_page") or 1)
+        except (TypeError, ValueError):
+            last_page = 1
+        return page_items, max(1, last_page)
 
 
 def parse_kwork_hire_stats(user: dict) -> tuple[Optional[int], Optional[int]]:
@@ -169,6 +200,11 @@ def parse_kwork_hire_stats(user: dict) -> tuple[Optional[int], Optional[int]]:
         _stat_int(data.get("wants_hired_percent"), hi=100),
         _stat_int(data.get("wants_count"), hi=1_000_000),
     )
+
+
+def kwork_category_id(value: object) -> Optional[int]:
+    """Kwork sends category_id as a string. None if it is missing or junk."""
+    return _stat_int(value, hi=1_000_000)
 
 
 def _stat_int(raw: object, *, hi: int) -> Optional[int]:

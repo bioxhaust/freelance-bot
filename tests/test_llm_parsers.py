@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from draft_limits import draft_char_limit
 from llm import (
     _build_draft_prompt,
     _clamp_score,
@@ -10,6 +11,7 @@ from llm import (
     _parse_score_fallback,
     _parse_score_json,
     _smart_truncate,
+    fit_reply,
 )
 
 
@@ -97,6 +99,32 @@ def test_draft_prompt_keeps_approach_when_short() -> None:
     assert "Бюджет: не указан" in prompt
     assert "Срок: не указан" in prompt
     assert "короче обычного" in prompt
+
+
+def test_fit_reply_never_exceeds_platform_limits() -> None:
+    assert draft_char_limit("Kwork") == 2000
+    assert draft_char_limit("FL.ru") == 5000
+    assert draft_char_limit("FL.ru", short=True) == 700
+    blob = "Шаг. " * 4000
+    assert len(fit_reply(blob, 2000)) <= 2000
+    assert len(fit_reply(blob, 5000)) <= 5000
+    assert len(fit_reply("я" * 9000, 2000)) <= 2000
+    assert fit_reply("ровно", 10) == "ровно"
+
+
+def test_draft_prompt_asks_to_fill_long_limit() -> None:
+    prompt = _build_draft_prompt(
+        skills="S",
+        title="T",
+        description="D",
+        price="",
+        deadline="",
+        max_chars=2000,
+        style_hint="",
+    )
+    assert "не меньше 1500" in prompt
+    assert "github.com/bioxhaust" not in prompt or "репозитор" in prompt.lower()
+    assert "репозитор" in prompt.lower()
 
 
 def test_hash_key_is_stable_and_distinct() -> None:

@@ -11,7 +11,7 @@ from exchanges import Order
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _REQUIRED_COLUMNS = frozenset(
     {
@@ -29,12 +29,14 @@ _REQUIRED_COLUMNS = frozenset(
         "created_at",
         "client_hire_percent",
         "client_orders_count",
+        "offers_count",
+        "skipped",
     }
 )
 
 _ORDER_COLUMNS = (
     "title, description, price, deadline, client, source, url, "
-    "client_hire_percent, client_orders_count"
+    "client_hire_percent, client_orders_count, offers_count"
 )
 
 _CREATE_ORDERS_SQL = """
@@ -52,7 +54,9 @@ CREATE TABLE IF NOT EXISTS orders (
     applied_at   DATETIME,
     created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
     client_hire_percent INTEGER,
-    client_orders_count INTEGER
+    client_orders_count INTEGER,
+    offers_count INTEGER,
+    skipped INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -142,6 +146,14 @@ class Database:
                 "ALTER TABLE orders ADD COLUMN client_orders_count INTEGER"
             )
             logger.warning("Migration: added orders.client_orders_count column")
+        if "offers_count" not in cols:
+            await conn.execute("ALTER TABLE orders ADD COLUMN offers_count INTEGER")
+            logger.warning("Migration: added orders.offers_count column")
+        if "skipped" not in cols:
+            await conn.execute(
+                "ALTER TABLE orders ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.warning("Migration: added orders.skipped column")
 
         await conn.execute(
             "INSERT OR REPLACE INTO _meta(key, value) VALUES('schema_version', ?)",
@@ -175,15 +187,15 @@ class Database:
             return await cur.fetchone() is not None
 
     async def save_order_if_new(
-        self, order: Order, relevance: int | None = None
+        self, order: Order, relevance: int | None = None, *, skipped: bool = False
     ) -> bool:
         async with self._lock:
             cur = await self.conn.execute(
                 """
                 INSERT OR IGNORE INTO orders
                     (title, description, price, deadline, client, source, url, relevance,
-                     client_hire_percent, client_orders_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     client_hire_percent, client_orders_count, offers_count, skipped)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.title,
@@ -196,6 +208,8 @@ class Database:
                     relevance,
                     order.client_hire_percent,
                     order.client_orders_count,
+                    order.offers_count,
+                    1 if skipped else 0,
                 ),
             )
             return cur.rowcount > 0
@@ -203,7 +217,38 @@ class Database:
     async def save_order(self, order: Order, relevance: int | None = None) -> None:
         await self.save_order_if_new(order, relevance)
 
+    async def pipeline_state(self, url: str) -> str:
+        """missing | pending | done | skipped.
+
+        pending means the row was reserved but scoring did not finish, so the
+        next cycle should try again instead of treating it as a duplicate.
+        """
+        async with self._lock:
+            async with self.conn.execute(
+                "SELECT relevance, skipped FROM orders WHERE url = ? LIMIT 1",
+                (url,),
+            ) as cur:
+                row = await cur.fetchone()
+        if row is None:
+            return "missing"
+        if int(row["skipped"] or 0):
+            return "skipped"
+        if row["relevance"] is None:
+            return "pending"
+        return "done"
+
+    async def mark_skipped(self, url: str) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                "UPDATE orders SET skipped = 1 WHERE url = ?",
+                (url,),
+            )
+
     async def get_order_by_url(self, url: str) -> Optional[Order]:
+        async with self._lock:
+            return await self._get_order_by_url(url)
+
+    async def _get_order_by_url(self, url: str) -> Optional[Order]:
         async with self.conn.execute(
             f"""
             SELECT {_ORDER_COLUMNS}
@@ -219,35 +264,43 @@ class Database:
         return _order_from_row(row)
 
     async def update_relevance(self, url: str, relevance: int) -> None:
-        await self.conn.execute(
-            "UPDATE orders SET relevance = ? WHERE url = ?",
-            (int(relevance), url),
-        )
+        async with self._lock:
+            await self.conn.execute(
+                "UPDATE orders SET relevance = ?, skipped = 0 WHERE url = ?",
+                (int(relevance), url),
+            )
 
     async def update_description(self, url: str, description: str) -> None:
-        await self.conn.execute(
-            "UPDATE orders SET description = ? WHERE url = ?",
-            (description, url),
-        )
+        async with self._lock:
+            await self.conn.execute(
+                "UPDATE orders SET description = ? WHERE url = ?",
+                (description, url),
+            )
 
     async def is_applied(self, url: str) -> bool:
-        async with self.conn.execute(
-            "SELECT applied FROM orders WHERE url = ? LIMIT 1", (url,)
-        ) as cur:
-            row = await cur.fetchone()
-        return bool(row and row[0])
+        async with self._lock:
+            async with self.conn.execute(
+                "SELECT applied FROM orders WHERE url = ? LIMIT 1", (url,)
+            ) as cur:
+                row = await cur.fetchone()
+            return bool(row and row[0])
 
     async def mark_applied(self, url: str) -> None:
-        await self.conn.execute(
-            """
-            UPDATE orders
-            SET applied = 1, applied_at = CURRENT_TIMESTAMP
-            WHERE url = ?
-            """,
-            (url,),
-        )
+        async with self._lock:
+            await self.conn.execute(
+                """
+                UPDATE orders
+                SET applied = 1, applied_at = CURRENT_TIMESTAMP
+                WHERE url = ?
+                """,
+                (url,),
+            )
 
     async def stats(self, threshold: int = 70) -> dict[str, Any]:
+        async with self._lock:
+            return await self._stats(threshold)
+
+    async def _stats(self, threshold: int) -> dict[str, Any]:
         async with self.conn.execute(
             """
             SELECT
@@ -294,6 +347,10 @@ class Database:
     ) -> list[Order]:
         """Top relevance >=threshold orders from last 24h that the user
         has not yet marked applied. Used by /digest."""
+        async with self._lock:
+            return await self._top_unhandled(threshold, limit)
+
+    async def _top_unhandled(self, threshold: int, limit: int) -> list[Order]:
         async with self.conn.execute(
             f"""
             SELECT {_ORDER_COLUMNS}
@@ -318,6 +375,10 @@ class Database:
         """
         if max_age_days <= 0:
             return 0
+        async with self._lock:
+            return await self._cleanup_old(max_age_days)
+
+    async def _cleanup_old(self, max_age_days: int) -> int:
         async with self.conn.execute(
             f"""
             DELETE FROM orders
@@ -334,9 +395,14 @@ class Database:
         return int(deleted or 0)
 
     async def vacuum(self) -> None:
-        await self.conn.execute("VACUUM")
+        async with self._lock:
+            await self.conn.execute("VACUUM")
 
     async def applied_today(self, limit: int = 10) -> list[Order]:
+        async with self._lock:
+            return await self._applied_today(limit)
+
+    async def _applied_today(self, limit: int) -> list[Order]:
         async with self.conn.execute(
             f"""
             SELECT {_ORDER_COLUMNS}
@@ -368,4 +434,5 @@ def _order_from_row(row: aiosqlite.Row) -> Order:
         url=row["url"],
         client_hire_percent=_opt_int("client_hire_percent"),
         client_orders_count=_opt_int("client_orders_count"),
+        offers_count=_opt_int("offers_count"),
     )

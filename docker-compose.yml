@@ -1,0 +1,8 @@
+services:
+  bot:
+    build: .
+    container_name: freelance-bot
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./orders.db:/app/orders.db

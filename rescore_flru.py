@@ -21,6 +21,7 @@ import time
 from config import load_settings
 from db import Database
 from exchanges.flru import FLRuExchange
+from github_profile import model_skills
 from http_client import HttpClient
 from llm import LLMClient
 from logging_setup import setup_logging
@@ -79,7 +80,7 @@ async def main(apply: bool, threshold: int, max_count: int | None) -> None:
 
         try:
             new_rel = await llm.score_relevance(
-                skills=settings.my_skills, title=title, description=full
+                skills=model_skills(settings.my_skills), title=title, description=full
             )
         except Exception:
             logger.exception("LLM rescore failed for %s", url)
