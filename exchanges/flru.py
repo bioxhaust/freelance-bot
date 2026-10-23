@@ -4,8 +4,14 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urljoin
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
 
 from aiohttp import ClientResponseError
 from selectolax.parser import HTMLParser, Node
@@ -18,6 +24,25 @@ logger = logging.getLogger(__name__)
 
 
 _BASE_URL = "https://www.fl.ru"
+_MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+_MONTHS = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
+_ABSOLUTE_RE = re.compile(
+    r"(\d{1,2})\s+([а-яё]+)\s*,\s*(\d{1,2}):(\d{2})",
+    re.IGNORECASE,
+)
 
 # Multi-token "X часов Y минут назад" pattern, plus "только что" / "сегодня" / "вчера".
 # All regex go through `lower()` text first.
@@ -52,15 +77,11 @@ class FLRuExchange(Exchange):
         self.max_pages = max(1, max_pages)
         self._page_sem = asyncio.Semaphore(max(1, page_concurrency))
         self._detail_sem = asyncio.Semaphore(max(1, detail_concurrency))
-        self._age_minutes_by_url: dict[str, int] = {}
 
     def debug_context(self) -> str:
         return "categories=" + ",".join(
             url.rstrip("/").split("/")[-1] for url in self.category_urls
         )
-
-    def order_age_minutes(self, order: Order) -> Optional[int]:
-        return self._age_minutes_by_url.get(order.url)
 
     async def fetch_orders(self) -> list[Order]:
         # FL.ru pagination is sequential per-category (we need to know when
@@ -72,21 +93,17 @@ class FLRuExchange(Exchange):
 
         all_orders: list[Order] = []
         seen_urls: set[str] = set()
-        age_by_url: dict[str, int] = {}
 
         for result in results:
             if isinstance(result, BaseException):
                 logger.warning("FL.ru category fetch failed: %r", result)
                 continue
-            for order, age in result:
+            for order, _age in result:
                 if order.url in seen_urls:
                     continue
                 seen_urls.add(order.url)
-                if age is not None:
-                    age_by_url[order.url] = age
                 all_orders.append(order)
 
-        self._age_minutes_by_url = age_by_url
         return all_orders
 
     async def _fetch_category(self, base_url: str) -> list[tuple[Order, Optional[int]]]:
@@ -194,7 +211,9 @@ def parse_flru_listing(html_text: str) -> list[tuple[Order, Optional[int]]]:
         if price_node:
             price = _clean(price_node.text(strip=True)) or price
 
-        age = _extract_age_minutes_from_card(card)
+        published = _extract_published_at(card)
+        age = _age_minutes(published)
+        offers = _extract_offers_count(card)
 
         out.append(
             (
@@ -206,6 +225,8 @@ def parse_flru_listing(html_text: str) -> list[tuple[Order, Optional[int]]]:
                     client="не указан",
                     source=FLRuExchange.source_name,
                     url=url,
+                    offers_count=offers,
+                    published_at=published,
                 ),
                 age,
             )
@@ -213,15 +234,73 @@ def parse_flru_listing(html_text: str) -> list[tuple[Order, Optional[int]]]:
     return out
 
 
-def _extract_age_minutes_from_card(card: Node) -> Optional[int]:
-    foot = card.css_first("div.b-post__foot")
-    snippet = ""
-    if foot is not None:
-        snippet = foot.text(strip=True).lower()
-    if not snippet:
-        snippet = card.text(strip=True).lower()
+_REPLIES_RE = re.compile(r"(\d+)\s*ответ", re.IGNORECASE)
 
-    return _parse_age_snippet(snippet)
+
+def _extract_offers_count(card: Node) -> Optional[int]:
+    node = card.css_first("span[data-id='fl-view-count-href']")
+    if node is None:
+        node = card.css_first("svg[title='Количество ответов']")
+    if node is None:
+        return None
+    snippet = node.text(strip=True).lower().replace("\xa0", " ")
+    match = _REPLIES_RE.search(snippet)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _extract_published_at(card: Node, now: Optional[datetime] = None) -> Optional[datetime]:
+    """Publication time from the listing timestamp, not the whole card.
+
+    FL.ru prints "6 часов 39 минут назад" for the first day and then an
+    absolute Moscow time like "22 октября, 08:01". The card body often
+    contains "назад" in the task text, so the fallback must not use it.
+    """
+    span = card.css_first("span.text-gray-opacity-4")
+    snippet = span.text(strip=True) if span is not None else ""
+    if not snippet:
+        foot = card.css_first("div.b-post__foot")
+        snippet = foot.text(strip=True) if foot is not None else ""
+    return parse_flru_published_at(snippet, now or datetime.now(timezone.utc))
+
+
+def parse_flru_published_at(snippet: str, now: datetime) -> Optional[datetime]:
+    """UTC publication time, or None when the listing has no timestamp."""
+    text = (snippet or "").lower().replace("\xa0", " ")
+    if not text:
+        return None
+    match = _ABSOLUTE_RE.search(text)
+    if match:
+        month = _MONTHS.get(match.group(2))
+        if month is None:
+            return None
+        msk_now = now.astimezone(_MOSCOW_TZ)
+        try:
+            local = datetime(
+                msk_now.year,
+                month,
+                int(match.group(1)),
+                int(match.group(3)),
+                int(match.group(4)),
+                tzinfo=_MOSCOW_TZ,
+            )
+        except ValueError:
+            return None
+        if local - msk_now > timedelta(days=1):
+            local = local.replace(year=local.year - 1)
+        return local.astimezone(timezone.utc)
+    age = _parse_age_snippet(text)
+    if age is None:
+        return None
+    return now - timedelta(minutes=age)
+
+
+def _age_minutes(published: Optional[datetime], now: Optional[datetime] = None) -> Optional[int]:
+    if published is None:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return max(0, int((current - published).total_seconds() // 60))
 
 
 def _parse_age_snippet(snippet: str) -> Optional[int]:

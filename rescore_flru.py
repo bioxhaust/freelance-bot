@@ -21,6 +21,7 @@ import time
 from config import load_settings
 from db import Database
 from exchanges.flru import FLRuExchange
+from github_profile import model_skills
 from http_client import HttpClient
 from llm import LLMClient
 from logging_setup import setup_logging
@@ -32,7 +33,7 @@ async def main(apply: bool, threshold: int, max_count: int | None) -> None:
     setup_logging("INFO")
     settings = load_settings()
 
-    db = Database("orders.db")
+    db = Database(settings.db_path)
     await db.init()
 
     async with db.conn.execute(
@@ -60,7 +61,13 @@ async def main(apply: bool, threshold: int, max_count: int | None) -> None:
 
     http = HttpClient()
     flru = FLRuExchange(http=http, cookies=settings.flru_cookies, detail_concurrency=3)
-    llm = LLMClient(api_key=settings.ollama_api_key, model=settings.ollama_model, http=http)
+    llm = LLMClient(
+        api_key=settings.ollama_api_key,
+        model=settings.ollama_model,
+        http=http,
+        api_keys=list(settings.ollama_api_keys),
+    )
+    await llm.prefer_funded_account()
 
     started = time.time()
     upgraded = 0
@@ -79,7 +86,7 @@ async def main(apply: bool, threshold: int, max_count: int | None) -> None:
 
         try:
             new_rel = await llm.score_relevance(
-                skills=settings.my_skills, title=title, description=full
+                skills=model_skills(settings.my_skills), title=title, description=full
             )
         except Exception:
             logger.exception("LLM rescore failed for %s", url)

@@ -18,7 +18,7 @@ async def main() -> None:
     settings = load_settings()
     runtime = RuntimeState.from_settings(settings.relevance_threshold)
 
-    db = Database("orders.db")
+    db = Database(settings.db_path)
     await db.init()
 
     http = HttpClient()
@@ -40,7 +40,9 @@ async def main() -> None:
         api_key=settings.ollama_api_key,
         model=settings.ollama_model,
         http=http,
+        api_keys=list(settings.ollama_api_keys),
     )
+    await llm.prefer_funded_account()
     notifier = TelegramNotifier(
         token=settings.telegram_bot_token,
         chat_id=settings.telegram_chat_id,

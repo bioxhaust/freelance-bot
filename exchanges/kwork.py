@@ -28,44 +28,34 @@ class KworkExchange(Exchange):
         http: HttpClient,
         cookies: str = "",
         max_pages: int = 10,
-        categories: tuple[int, ...] = (41, 11, 45),
+        categories: tuple[int, ...] = (41, 37, 38, 39, 80, 255),
         page_concurrency: int = 4,
     ) -> None:
         self.http = http
         self.cookies = cookies
         self.max_pages = max(1, max_pages)
-        self.categories = tuple(categories) if categories else (41, 11, 45)
+        self.categories = tuple(categories) if categories else (41, 37, 38, 39, 80, 255)
         self._page_sem = asyncio.Semaphore(max(1, page_concurrency))
-        self._created_at_by_url: dict[str, datetime] = {}
 
     def debug_context(self) -> str:
         return f"categories={','.join(str(x) for x in self.categories)}"
 
-    def order_age_minutes(self, order: Order) -> Optional[int]:
-        created_at = self._created_at_by_url.get(order.url)
-        if created_at is None:
-            return None
-        delta = datetime.now(timezone.utc) - created_at
-        return max(0, int(delta.total_seconds() // 60))
-
     async def fetch_orders(self) -> list[Order]:
-        tasks = [
-            self._fetch_page(category_id, page)
-            for category_id in self.categories
-            for page in range(1, self.max_pages + 1)
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Page 1 tells us last_page, so we do not request empty pages.
+        results = await asyncio.gather(
+            *(self._fetch_category(category_id) for category_id in self.categories),
+            return_exceptions=True,
+        )
 
         items: list[dict] = []
         for result in results:
             if isinstance(result, BaseException):
-                logger.warning("Kwork page fetch failed: %r", result)
+                logger.warning("Kwork category fetch failed: %r", result)
                 continue
             items.extend(result)
 
         orders: list[Order] = []
         seen_urls: set[str] = set()
-        created_at_by_url: dict[str, datetime] = {}
         category_mismatches = 0
 
         for item in items:
@@ -83,28 +73,23 @@ class KworkExchange(Exchange):
             price = f"{price_limit} RUB" if price_limit else "по договоренности"
             deadline = (item.get("max_days") or "").strip() or "не указан"
             client = (user.get("username") or "").strip() or "не указан"
+            hire_percent, orders_count = parse_kwork_hire_stats(user)
+            offers_count = _stat_int(item.get("kwork_count"), hi=1_000_000)
             url = f"https://kwork.ru/projects/{order_id}/view"
             if url in seen_urls:
                 continue
             seen_urls.add(url)
 
-            actual_cat = item.get("category_id")
+            # category_id arrives as a string ("41"). Compare as int, and
+            # drop projects the feed mixed in from another category.
+            actual_cat = kwork_category_id(item.get("category_id"))
             if (
                 actual_cat is not None
                 and self.categories
                 and actual_cat not in self.categories
             ):
                 category_mismatches += 1
-
-            date_create = (item.get("date_create") or "").strip()
-            if date_create:
-                try:
-                    naive = datetime.strptime(date_create, "%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    pass
-                else:
-                    aware_msk = naive.replace(tzinfo=_MOSCOW_TZ)
-                    created_at_by_url[url] = aware_msk.astimezone(timezone.utc)
+                continue
 
             orders.append(
                 Order(
@@ -115,6 +100,10 @@ class KworkExchange(Exchange):
                     client=client,
                     source=self.source_name,
                     url=url,
+                    client_hire_percent=hire_percent,
+                    client_orders_count=orders_count,
+                    offers_count=offers_count,
+                    published_at=kwork_published_at(item.get("date_create")),
                 )
             )
 
@@ -124,10 +113,31 @@ class KworkExchange(Exchange):
                 category_mismatches, self.categories,
             )
 
-        self._created_at_by_url = created_at_by_url
         return orders
 
-    async def _fetch_page(self, category_id: int, page: int) -> list[dict]:
+    async def _fetch_category(self, category_id: int) -> list[dict]:
+        items, last_page = await self._fetch_page(category_id, 1)
+        last_page = max(1, min(last_page, self.max_pages))
+        if last_page == 1:
+            return items
+        rest = await asyncio.gather(
+            *(
+                self._fetch_page(category_id, page)
+                for page in range(2, last_page + 1)
+            ),
+            return_exceptions=True,
+        )
+        for result in rest:
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Kwork page fetch failed for c=%s: %r", category_id, result
+                )
+                continue
+            page_items, _last = result
+            items.extend(page_items)
+        return items
+
+    async def _fetch_page(self, category_id: int, page: int) -> tuple[list[dict], int]:
         async with self._page_sem:
             headers = {
                 "Accept": "application/json, text/plain, */*",
@@ -148,5 +158,58 @@ class KworkExchange(Exchange):
                 response.raise_for_status()
                 payload = await response.json(content_type=None)
 
-        page_items = ((payload.get("data") or {}).get("pagination") or {}).get("data") or []
-        return page_items
+        pagination = ((payload.get("data") or {}).get("pagination") or {})
+        page_items = pagination.get("data") or []
+        try:
+            last_page = int(pagination.get("last_page") or 1)
+        except (TypeError, ValueError):
+            last_page = 1
+        return page_items, max(1, last_page)
+
+
+def kwork_published_at(raw: object) -> Optional[datetime]:
+    """Kwork `date_create` is a naive Moscow timestamp."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        naive = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return naive.replace(tzinfo=_MOSCOW_TZ).astimezone(timezone.utc)
+
+
+def parse_kwork_hire_stats(user: dict) -> tuple[Optional[int], Optional[int]]:
+    """Read buyer hire rate from a Kwork project user object.
+
+    `wants_hired_percent` is the share of this buyer's projects where they
+    picked a freelancer. `wants_count` is how many projects that share covers.
+    Both arrive as strings. Missing or garbage values become None; 0 is kept.
+    """
+    data = user.get("data") if isinstance(user, dict) else None
+    if not isinstance(data, dict):
+        return None, None
+    return (
+        _stat_int(data.get("wants_hired_percent"), hi=100),
+        _stat_int(data.get("wants_count"), hi=1_000_000),
+    )
+
+
+def kwork_category_id(value: object) -> Optional[int]:
+    """Kwork sends category_id as a string. None if it is missing or junk."""
+    return _stat_int(value, hi=1_000_000)
+
+
+def _stat_int(raw: object, *, hi: int) -> Optional[int]:
+    if raw is None:
+        return None
+    text = str(raw).strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        value = int(round(float(text)))
+    except (TypeError, ValueError):
+        return None
+    if value < 0 or value > hi:
+        return None
+    return value

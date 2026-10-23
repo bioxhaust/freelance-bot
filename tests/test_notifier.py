@@ -1,6 +1,8 @@
 """Pure rendering tests for notifier.py — no Telegram I/O."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from exchanges import Order
 from notifier import (
     build_actions_keyboard,
@@ -41,14 +43,56 @@ def test_render_escapes_url_in_href() -> None:
     assert "&lt;x&gt;&amp;y=1" in rendered
 
 
+def test_render_shows_kwork_hire_rate_next_to_client() -> None:
+    order = _nasty_order()
+    order.client = "pasha-project"
+    order.client_hire_percent = 85
+    order.client_orders_count = 37
+    rendered = render_order_card(order, 80, "")
+    assert "👤 pasha-project · нанял в 85% из 37 заказов" in rendered
+
+
+def test_render_shows_zero_hire_rate() -> None:
+    order = _nasty_order()
+    order.client = "newbuyer"
+    order.client_hire_percent = 0
+    order.client_orders_count = 1
+    rendered = render_order_card(order, 80, "")
+    assert "нанял в 0% из 1 заказа" in rendered
+
+
+def test_render_omits_hire_rate_when_exchange_has_none() -> None:
+    rendered = render_order_card(_nasty_order(), 80, "")
+    assert "нанял" not in rendered
+
+
+def test_hire_phrase_genitive() -> None:
+    order = _nasty_order()
+    order.client_hire_percent = 21
+    order.client_orders_count = 21
+    assert order.hire_phrase() == "нанял в 21% из 21 заказа"
+    order.client_orders_count = 11
+    assert order.hire_phrase() == "нанял в 21% из 11 заказов"
+    order.client_orders_count = None
+    assert order.hire_phrase() == "нанял в 21% заказов"
+
+
+def test_render_includes_moscow_publication_time() -> None:
+    order = _nasty_order()
+    order.published_at = datetime(2026, 10, 23, 5, 47, tzinfo=timezone.utc)
+    rendered = render_order_card(order, 80, "")
+    assert "🕐 23 октября, 08:47 мск" in rendered
+
+
 def test_render_includes_relevance_marker() -> None:
     rendered = render_order_card(_nasty_order(), 87, "")
     assert "· 87%" in rendered
 
 
-def test_render_card_under_telegram_limit() -> None:
+def test_long_draft_keeps_pre_closed() -> None:
     rendered = render_order_card(_nasty_order(), 87, "X" * 5000)
-    assert len(rendered) <= 4000  # leaves headroom under 4096
+    assert len(rendered) > 3500
+    assert rendered.count("<pre>") == rendered.count("</pre>") == 1
 
 
 def test_actions_keyboard_no_draft_layout() -> None:

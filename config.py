@@ -25,6 +25,9 @@ class Settings:
     telegram_bot_token: str
     telegram_chat_id: str
     ollama_api_key: str
+    # Primary key first, then spare accounts. The spare is used only after
+    # the primary reports that its credits are gone.
+    ollama_api_keys: tuple[str, ...]
     ollama_model: str
     my_skills: str
     prefilter_include_keywords: list[str]
@@ -40,6 +43,11 @@ class Settings:
     flru_cookies: str
     cleanup_max_age_days: int
     cleanup_every_cycles: int
+    # Unused for the send window. Kept so existing .env files still load.
+    backlog_max_age_minutes: int
+    llm_concurrency: int
+    # SQLite path. Docker sets /data/orders.db so the WAL sits on the volume.
+    db_path: str
 
 
 def _require(name: str) -> str:
@@ -88,12 +96,25 @@ def _bounded_int(name: str, default: int, *, lo: int, hi: int) -> int:
     return value
 
 
+def _ollama_api_keys() -> tuple[str, ...]:
+    keys: list[str] = []
+    for name in ("OLLAMA_API_KEY", "OLLAMA_API_KEY_2", "OLLAMA_API_KEY_3"):
+        value = os.getenv(name, "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    if not keys:
+        raise ValueError("Missing required env var: OLLAMA_API_KEY")
+    return tuple(keys)
+
+
 def load_settings() -> Settings:
+    ollama_keys = _ollama_api_keys()
     return Settings(
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_require("TELEGRAM_CHAT_ID"),
-        ollama_api_key=_require("OLLAMA_API_KEY"),
-        ollama_model=os.getenv("OLLAMA_MODEL", "gpt-oss:120b"),
+        ollama_api_key=ollama_keys[0],
+        ollama_api_keys=ollama_keys,
+        ollama_model=os.getenv("OLLAMA_MODEL", "beam"),
         my_skills=_require("MY_SKILLS"),
         prefilter_include_keywords=_csv_list(
             "PREFILTER_INCLUDE_KEYWORDS",
@@ -122,8 +143,15 @@ def load_settings() -> Settings:
             "FRESH_ORDER_MAX_AGE_MINUTES", 30, lo=0, hi=60 * 24 * 7
         ),
         kwork_cookies=os.getenv("KWORK_COOKIES", ""),
-        kwork_categories=_int_tuple("KWORK_CATEGORIES", (41, 11, 45)),
+        kwork_categories=_int_tuple(
+            "KWORK_CATEGORIES", (41, 37, 38, 39, 80, 255)
+        ),
         flru_cookies=os.getenv("FLRU_COOKIES", ""),
         cleanup_max_age_days=_bounded_int("CLEANUP_MAX_AGE_DAYS", 30, lo=0, hi=365),
         cleanup_every_cycles=_bounded_int("CLEANUP_EVERY_CYCLES", 60, lo=1, hi=10000),
+        backlog_max_age_minutes=_bounded_int(
+            "BACKLOG_MAX_AGE_MINUTES", 180, lo=0, hi=60 * 24 * 7
+        ),
+        llm_concurrency=_bounded_int("LLM_CONCURRENCY", 3, lo=1, hi=8),
+        db_path=os.getenv("DB_PATH", "orders.db").strip() or "orders.db",
     )
