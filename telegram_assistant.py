@@ -205,6 +205,8 @@ class TelegramAssistant:
             description=order.description,
             max_chars=max_chars,
             style_hint=style_hint,
+            price=order.price,
+            deadline=order.deadline,
         )
         safe = html.escape(draft, quote=False)
         await message.reply(
@@ -325,6 +327,8 @@ class TelegramAssistant:
                     title=order.title,
                     description=order.description,
                     max_chars=self.settings.draft_max_chars,
+                    price=order.price,
+                    deadline=order.deadline,
                 )
             except Exception:
                 logger.exception("Draft generation on Send failed for %s", order.url)
@@ -377,6 +381,8 @@ class TelegramAssistant:
                 description=order.description,
                 max_chars=max_chars,
                 style_hint=style_hint,
+                price=order.price,
+                deadline=order.deadline,
             )
         except Exception:
             logger.exception("Draft generation failed for %s", order.url)
@@ -397,7 +403,10 @@ class TelegramAssistant:
     def _style_for(self, action: str) -> tuple[str, int]:
         max_chars = self.settings.draft_max_chars
         if action == "short":
-            return ("максимально коротко и по делу", min(400, max_chars))
+            return (
+                "короче обычного, но оставь сжатый план решения из 2 шагов",
+                min(500, max_chars),
+            )
         if action in _TONE_HINTS:
             return (_TONE_HINTS[action], max_chars)
         # Legacy callbacks from old keyboards
@@ -527,8 +536,9 @@ class TelegramAssistant:
         await message.reply(
             "<b>Кнопки под карточкой:</b>\n"
             "• 📨 Отправить — пометить как отправленное\n"
-            "• ✏️ Сгенерировать черновик / 🔄 Перегенерить\n"
-            "• ✂️ Короче — компактный отклик\n"
+            "• ✏️ Сгенерировать черновик / 🔄 Перегенерить — "
+            "отклик с планом, как решать задачу\n"
+            "• ✂️ Короче — тот же план, но в 2 шага\n"
             "• 🎭 Сменить тон — 💼 Деловой / 🤝 Дружелюбный / 🔥 Жёсткий\n"
             "• ❓ Почему — пояснение релевантности\n"
             "• 🌐 Открыть / ⏭ Пропустить / 🗄 В архив\n\n"

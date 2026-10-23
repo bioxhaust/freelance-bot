@@ -106,9 +106,19 @@ class LLMClient:
         description: str,
         max_chars: int = 700,
         style_hint: str = "",
+        price: str = "",
+        deadline: str = "",
     ) -> str:
         cache_key = _hash_key(
-            "draft", skills, title, description, str(max_chars), style_hint
+            "draft",
+            _DRAFT_PROMPT_VERSION,
+            skills,
+            title,
+            description,
+            price,
+            deadline,
+            str(max_chars),
+            style_hint,
         )
         async with self._cache_lock:
             cached = self._draft_cache.get(cache_key)
@@ -117,19 +127,14 @@ class LLMClient:
             return cached
         self.cache_misses += 1
 
-        prompt = (
-            "Ты помогаешь писать отклики на фриланс-заказы.\n"
-            "Сформируй краткий, уверенный и дружелюбный отклик на русском языке.\n"
-            "Требования:\n"
-            "- без воды и без шаблонного пафоса;\n"
-            "- 3-6 предложений;\n"
-            "- подчеркни релевантный опыт и предложи следующий шаг;\n"
-            "- не придумывай факты, опирайся на навыки ниже.\n"
-            f"- максимум {max_chars} символов.\n\n"
-            f"Дополнительный стиль: {style_hint or 'нейтральный деловой тон'}.\n\n"
-            f"Мои навыки:\n{skills}\n\n"
-            f"Название заказа:\n{title}\n\n"
-            f"Описание заказа:\n{description}\n"
+        prompt = _build_draft_prompt(
+            skills=skills,
+            title=title,
+            description=description,
+            price=price,
+            deadline=deadline,
+            max_chars=max_chars,
+            style_hint=style_hint,
         )
         draft = _smart_truncate(await self._chat(prompt), max_chars)
         async with self._cache_lock:
@@ -196,6 +201,63 @@ class LLMClient:
             response.raise_for_status()
             data = await response.json()
         return data["message"]["content"]
+
+
+# Bump when the draft instructions change so a long-running process does not
+# reuse replies written by the previous prompt.
+_DRAFT_PROMPT_VERSION = "approach-v1"
+
+
+def _build_draft_prompt(
+    *,
+    skills: str,
+    title: str,
+    description: str,
+    price: str,
+    deadline: str,
+    max_chars: int,
+    style_hint: str,
+) -> str:
+    """Reply the user can paste into Kwork / FL.ru.
+
+    The body must say how *this* order would be solved, not only that the
+    freelancer is a fit.
+    """
+    budget = (price or "").strip() or "не указан"
+    term = (deadline or "").strip() or "не указан"
+    tone = style_hint.strip() or "нейтральный деловой тон"
+    return (
+        "Ты помогаешь писать отклики на фриланс-заказы.\n"
+        "Сформируй готовый текст от первого лица на русском языке: его можно "
+        "сразу вставить в отклик, без пометок «черновик» и без заголовков.\n"
+        "Структура, одним сообщением:\n"
+        "1) Одно-два предложения, чем я подхожу. Только то, что прямо следует "
+        "из навыков ниже.\n"
+        "2) Как я подойду к решению именно этой задачи: 2-4 конкретных шага. "
+        "С чего начну, что сделаю, что сдам на выходе. Шаги привяжи к "
+        "формулировке заказа (функции, интеграции, ограничения), а не к общему "
+        "шаблону «любой сайт / любой бот».\n"
+        "3) Одно предложение — следующий шаг: уточняющий вопрос по заказу или "
+        "предложение начать.\n"
+        "Требования:\n"
+        "- без воды и без шаблонного пафоса;\n"
+        "- запрещены пустые фразы: «изучу ТЗ и сделаю качественно», "
+        "«большой опыт», «индивидуальный подход», «гарантирую результат»;\n"
+        "- не придумывай факты, кейсы, сроки, цены и технологии, которых нет "
+        "в навыках или в заказе;\n"
+        "- если деталей мало, строй план из того, что сказано, и в последнем "
+        "предложении напиши, что уточнишь;\n"
+        "- если стиль просит короче, подход не выкидывай: сожми его до 2 шагов;\n"
+        "- учитывай бюджет и срок, если они указаны: не обещай объём, который "
+        "в них явно не помещается;\n"
+        f"- максимум {max_chars} символов.\n\n"
+        f"Дополнительный стиль: {tone}.\n\n"
+        f"Мои навыки:\n{skills}\n\n"
+        f"Название заказа:\n{title}\n\n"
+        f"Описание заказа:\n{description}\n\n"
+        f"Бюджет: {budget}\n"
+        f"Срок: {term}\n"
+    )
 
 
 _JSON_SCORE_RE = re.compile(r'"score"\s*:\s*(\d{1,3})')

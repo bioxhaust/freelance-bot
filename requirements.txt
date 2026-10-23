@@ -3,4 +3,5 @@ aiohttp>=3.9.0
 aiosqlite>=0.20.0
 cachetools>=5.3.3
 python-dotenv>=1.0.1
-selectolax>=0.3.21
+# 1.0 removes the modest HTMLParser this code imports.
+selectolax>=0.3.21,<1

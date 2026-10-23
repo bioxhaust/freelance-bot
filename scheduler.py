@@ -190,6 +190,8 @@ class Scheduler:
                             title=order.title,
                             description=order.description,
                             max_chars=self.settings.draft_max_chars,
+                            price=order.price,
+                            deadline=order.deadline,
                         )
                     except Exception:
                         draft_errors += 1
