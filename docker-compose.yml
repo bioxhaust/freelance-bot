@@ -3,6 +3,11 @@ services:
     build: .
     container_name: freelance-bot
     env_file: .env
+    environment:
+      # Directory mount, not a single file. SQLite WAL/SHM are created next
+      # to the database; a file bind-mount leaves them in the container
+      # layer, so a restart drops every score that was not checkpointed.
+      DB_PATH: /data/orders.db
     restart: unless-stopped
     volumes:
-      - ./orders.db:/app/orders.db
+      - ./data:/data

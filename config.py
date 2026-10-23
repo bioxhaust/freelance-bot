@@ -44,6 +44,8 @@ class Settings:
     # 0 disables the age gate (same as FRESH_ORDER_MAX_AGE_MINUTES=0).
     backlog_max_age_minutes: int
     llm_concurrency: int
+    # SQLite path. Docker sets /data/orders.db so the WAL sits on the volume.
+    db_path: str
 
 
 def _require(name: str) -> str:
@@ -134,4 +136,5 @@ def load_settings() -> Settings:
             "BACKLOG_MAX_AGE_MINUTES", 180, lo=0, hi=60 * 24 * 7
         ),
         llm_concurrency=_bounded_int("LLM_CONCURRENCY", 3, lo=1, hi=8),
+        db_path=os.getenv("DB_PATH", "orders.db").strip() or "orders.db",
     )

@@ -33,7 +33,7 @@ async def main(apply: bool, threshold: int, max_count: int | None) -> None:
     setup_logging("INFO")
     settings = load_settings()
 
-    db = Database("orders.db")
+    db = Database(settings.db_path)
     await db.init()
 
     async with db.conn.execute(

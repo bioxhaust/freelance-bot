@@ -18,7 +18,7 @@ async def main() -> None:
     settings = load_settings()
     runtime = RuntimeState.from_settings(settings.relevance_threshold)
 
-    db = Database("orders.db")
+    db = Database(settings.db_path)
     await db.init()
 
     http = HttpClient()

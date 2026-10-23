@@ -12,8 +12,8 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-# Mount only the database file, not /app. A volume on /app hides code
-# updates: docker keeps the first copy of the sources and ignores rebuilds.
-#   docker run --env-file .env -v $(pwd)/orders.db:/app/orders.db freelance-bot
+# Do not put a volume on /app: docker keeps the first copy of the sources
+# and ignores rebuilds. Persist the database as a directory (see
+# docker-compose.yml) so orders.db, the WAL, and the SHM stay together.
 
 CMD ["python", "main.py"]
