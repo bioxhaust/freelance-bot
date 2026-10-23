@@ -130,6 +130,7 @@ class Scheduler:
         raw = await self.db.meta_get("notify_after")
         if raw:
             cutoff = datetime.fromisoformat(raw)
+            logger.info("Notify cutoff is %s. Older orders will not be sent.", cutoff.isoformat())
         else:
             cutoff = datetime.now(timezone.utc).replace(microsecond=0)
             await self.db.meta_set("notify_after", cutoff.isoformat())
