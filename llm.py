@@ -130,25 +130,29 @@ class LLMClient:
         return self._api_keys[self._key_index]
 
     async def prefer_funded_account(self) -> None:
-        """Stay on the primary key until its balance is actually empty."""
+        """Use the first account that still has credits."""
         count = len(self._api_keys)
-        if count < 2:
-            logger.info("Ollama accounts configured: 1")
-            return
         logger.info("Ollama accounts configured: %s", count)
-        balance = await self._account_balance(self._api_keys[0])
-        if balance.usd is not None:
-            logger.info("Primary Ollama balance: $%.2f", balance.usd)
-        if not balance.empty:
-            if balance.usd is None:
-                logger.warning(
-                    "Could not read the primary Ollama balance, keeping account 1"
-                )
+        if count < 2:
             return
-        self._key_index = 1
-        logger.warning(
-            "Primary Ollama account has no credits, using account 2 of %s", count
-        )
+        for index, key in enumerate(self._api_keys):
+            balance = await self._account_balance(key)
+            if index == 0 and balance.usd is not None:
+                logger.info("Primary Ollama balance: $%.2f", balance.usd)
+            if not balance.empty:
+                if balance.usd is None and index == 0:
+                    logger.warning(
+                        "Could not read the primary Ollama balance, keeping account 1"
+                    )
+                self._key_index = index
+                if index:
+                    logger.warning(
+                        "Using Ollama account %s/%s", index + 1, count
+                    )
+                return
+            logger.warning("Ollama account %s/%s has no credits", index + 1, count)
+        self._key_index = count - 1
+        logger.warning("Every configured Ollama account reports no credits")
 
     async def _account_balance(self, api_key: str) -> AccountBalance:
         headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}

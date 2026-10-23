@@ -98,7 +98,7 @@ def _bounded_int(name: str, default: int, *, lo: int, hi: int) -> int:
 
 def _ollama_api_keys() -> tuple[str, ...]:
     keys: list[str] = []
-    for name in ("OLLAMA_API_KEY", "OLLAMA_API_KEY_2"):
+    for name in ("OLLAMA_API_KEY", "OLLAMA_API_KEY_2", "OLLAMA_API_KEY_3"):
         value = os.getenv(name, "").strip()
         if value and value not in keys:
             keys.append(value)

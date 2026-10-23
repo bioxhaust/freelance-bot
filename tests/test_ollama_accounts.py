@@ -117,16 +117,17 @@ async def test_chat_switches_to_the_spare_account() -> None:
     assert http.authorizations[-1] == "Bearer spare"
 
 
+def _empty_balance() -> dict[str, object]:
+    return {"included": {"balance_usd": 0}, "purchased": {"balance_usd": 0}}
+
+
+def _funded_balance(usd: float) -> dict[str, object]:
+    return {"included": {"balance_usd": usd}, "purchased": {"balance_usd": 0}}
+
+
 @pytest.mark.asyncio
 async def test_startup_moves_to_spare_when_primary_balance_is_empty() -> None:
-    http = _Http(
-        [
-            (
-                200,
-                {"included": {"balance_usd": 0}, "purchased": {"balance_usd": 0}},
-            )
-        ]
-    )
+    http = _Http([(200, _empty_balance()), (200, _funded_balance(2.5))])
     client = LLMClient(
         "primary",
         "m",
@@ -135,3 +136,22 @@ async def test_startup_moves_to_spare_when_primary_balance_is_empty() -> None:
     )
     await client.prefer_funded_account()
     assert client.api_key == "spare"
+
+
+@pytest.mark.asyncio
+async def test_startup_skips_two_empty_accounts() -> None:
+    http = _Http(
+        [
+            (200, _empty_balance()),
+            (200, _empty_balance()),
+            (200, _funded_balance(2.5)),
+        ]
+    )
+    client = LLMClient(
+        "primary",
+        "m",
+        http=http,  # type: ignore[arg-type]
+        api_keys=["primary", "second", "third"],
+    )
+    await client.prefer_funded_account()
+    assert client.api_key == "third"
