@@ -114,7 +114,7 @@ def load_settings() -> Settings:
         telegram_chat_id=_require("TELEGRAM_CHAT_ID"),
         ollama_api_key=ollama_keys[0],
         ollama_api_keys=ollama_keys,
-        ollama_model=os.getenv("OLLAMA_MODEL", "gpt-oss:120b"),
+        ollama_model=os.getenv("OLLAMA_MODEL", "beam"),
         my_skills=_require("MY_SKILLS"),
         prefilter_include_keywords=_csv_list(
             "PREFILTER_INCLUDE_KEYWORDS",

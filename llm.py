@@ -132,6 +132,7 @@ class LLMClient:
     async def prefer_funded_account(self) -> None:
         """Use the first account that still has credits."""
         count = len(self._api_keys)
+        logger.info("Ollama model: %s", self.model)
         logger.info("Ollama accounts configured: %s", count)
         if count < 2:
             return
