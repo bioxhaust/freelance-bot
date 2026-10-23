@@ -12,8 +12,8 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-# Persist the SQLite DB outside the container by mounting a host file:
-#   docker run --rm -it --env-file .env -v $(pwd)/orders.db:/app/orders.db freelance-bot
-VOLUME ["/app"]
+# Mount only the database file, not /app. A volume on /app hides code
+# updates: docker keeps the first copy of the sources and ignores rebuilds.
+#   docker run --env-file .env -v $(pwd)/orders.db:/app/orders.db freelance-bot
 
 CMD ["python", "main.py"]
