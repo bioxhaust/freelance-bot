@@ -244,6 +244,24 @@ class Database:
                 (url,),
             )
 
+    async def meta_get(self, key: str) -> Optional[str]:
+        async with self._lock:
+            async with self.conn.execute(
+                "SELECT value FROM _meta WHERE key = ? LIMIT 1",
+                (key,),
+            ) as cur:
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return str(row["value"])
+
+    async def meta_set(self, key: str, value: str) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                "INSERT OR REPLACE INTO _meta(key, value) VALUES(?, ?)",
+                (key, value),
+            )
+
     async def get_order_by_url(self, url: str) -> Optional[Order]:
         async with self._lock:
             return await self._get_order_by_url(url)

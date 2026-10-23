@@ -1,6 +1,8 @@
 """Pure rendering tests for notifier.py — no Telegram I/O."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from exchanges import Order
 from notifier import (
     build_actions_keyboard,
@@ -73,6 +75,13 @@ def test_hire_phrase_genitive() -> None:
     assert order.hire_phrase() == "нанял в 21% из 11 заказов"
     order.client_orders_count = None
     assert order.hire_phrase() == "нанял в 21% заказов"
+
+
+def test_render_includes_moscow_publication_time() -> None:
+    order = _nasty_order()
+    order.published_at = datetime(2026, 10, 23, 5, 47, tzinfo=timezone.utc)
+    rendered = render_order_card(order, 80, "")
+    assert "🕐 23 октября, 08:47 мск" in rendered
 
 
 def test_render_includes_relevance_marker() -> None:

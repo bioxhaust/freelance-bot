@@ -2,7 +2,30 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+
+
+_MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+_MONTHS_GENITIVE = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
 
 
 @dataclass
@@ -21,6 +44,8 @@ class Order:
     client_orders_count: Optional[int] = None
     # How many bids are already on this project. Lower is easier to win.
     offers_count: Optional[int] = None
+    # When the exchange published the project, UTC. Unknown means "do not send".
+    published_at: Optional[datetime] = None
 
     def hire_phrase(self) -> Optional[str]:
         """Short Russian label for the card, or None when the exchange has no stat."""
@@ -31,6 +56,15 @@ class Order:
         if count is None:
             return f"нанял в {percent}% заказов"
         return f"нанял в {percent}% из {_orders_genitive(count)}"
+
+    def published_phrase(self) -> Optional[str]:
+        """Publication time as shown on the exchanges, Moscow clock."""
+        published = self.published_at
+        if published is None:
+            return None
+        msk = published.astimezone(_MOSCOW_TZ)
+        month = _MONTHS_GENITIVE[msk.month - 1]
+        return f"{msk.day} {month}, {msk:%H:%M} мск"
 
 
 class Exchange(ABC):
@@ -44,7 +78,11 @@ class Exchange(ABC):
         return ""
 
     def order_age_minutes(self, order: Order) -> Optional[int]:
-        return None
+        published = order.published_at
+        if published is None:
+            return None
+        delta = datetime.now(timezone.utc) - published
+        return max(0, int(delta.total_seconds() // 60))
 
 
 def _orders_genitive(count: int) -> str:

@@ -229,6 +229,8 @@ def render_order_card(order: Order, relevance: int, draft_reply: str) -> str:
     ]
     if src:
         lines.append(f"📍 {src}")
+    if (published := order.published_phrase()) is not None:
+        lines.append(f"🕐 {published}")
     if (price := _safe_field(order.price)) is not None:
         lines.append(f"💰 {price}")
     if (deadline := _safe_field(order.deadline)) is not None:

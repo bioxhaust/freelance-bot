@@ -28,25 +28,17 @@ class KworkExchange(Exchange):
         http: HttpClient,
         cookies: str = "",
         max_pages: int = 10,
-        categories: tuple[int, ...] = (41, 11, 45),
+        categories: tuple[int, ...] = (41, 37, 38, 39, 80, 255),
         page_concurrency: int = 4,
     ) -> None:
         self.http = http
         self.cookies = cookies
         self.max_pages = max(1, max_pages)
-        self.categories = tuple(categories) if categories else (41, 11, 45)
+        self.categories = tuple(categories) if categories else (41, 37, 38, 39, 80, 255)
         self._page_sem = asyncio.Semaphore(max(1, page_concurrency))
-        self._created_at_by_url: dict[str, datetime] = {}
 
     def debug_context(self) -> str:
         return f"categories={','.join(str(x) for x in self.categories)}"
-
-    def order_age_minutes(self, order: Order) -> Optional[int]:
-        created_at = self._created_at_by_url.get(order.url)
-        if created_at is None:
-            return None
-        delta = datetime.now(timezone.utc) - created_at
-        return max(0, int(delta.total_seconds() // 60))
 
     async def fetch_orders(self) -> list[Order]:
         # Page 1 tells us last_page, so we do not request empty pages.
@@ -64,7 +56,6 @@ class KworkExchange(Exchange):
 
         orders: list[Order] = []
         seen_urls: set[str] = set()
-        created_at_by_url: dict[str, datetime] = {}
         category_mismatches = 0
 
         for item in items:
@@ -100,16 +91,6 @@ class KworkExchange(Exchange):
                 category_mismatches += 1
                 continue
 
-            date_create = (item.get("date_create") or "").strip()
-            if date_create:
-                try:
-                    naive = datetime.strptime(date_create, "%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    pass
-                else:
-                    aware_msk = naive.replace(tzinfo=_MOSCOW_TZ)
-                    created_at_by_url[url] = aware_msk.astimezone(timezone.utc)
-
             orders.append(
                 Order(
                     title=title,
@@ -122,6 +103,7 @@ class KworkExchange(Exchange):
                     client_hire_percent=hire_percent,
                     client_orders_count=orders_count,
                     offers_count=offers_count,
+                    published_at=kwork_published_at(item.get("date_create")),
                 )
             )
 
@@ -131,7 +113,6 @@ class KworkExchange(Exchange):
                 category_mismatches, self.categories,
             )
 
-        self._created_at_by_url = created_at_by_url
         return orders
 
     async def _fetch_category(self, category_id: int) -> list[dict]:
@@ -184,6 +165,18 @@ class KworkExchange(Exchange):
         except (TypeError, ValueError):
             last_page = 1
         return page_items, max(1, last_page)
+
+
+def kwork_published_at(raw: object) -> Optional[datetime]:
+    """Kwork `date_create` is a naive Moscow timestamp."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        naive = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return naive.replace(tzinfo=_MOSCOW_TZ).astimezone(timezone.utc)
 
 
 def parse_kwork_hire_stats(user: dict) -> tuple[Optional[int], Optional[int]]:

@@ -205,3 +205,10 @@ async def test_pipeline_retries_pending_and_skips_stale(db: Database) -> None:
 
     await db.update_relevance(fresh.url, 80)
     assert await db.pipeline_state(fresh.url) == "done"
+
+
+@pytest.mark.asyncio
+async def test_notify_cutoff_roundtrip(db: Database) -> None:
+    assert await db.meta_get("notify_after") is None
+    await db.meta_set("notify_after", "2026-10-23T05:47:00+00:00")
+    assert await db.meta_get("notify_after") == "2026-10-23T05:47:00+00:00"

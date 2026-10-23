@@ -40,8 +40,7 @@ class Settings:
     flru_cookies: str
     cleanup_max_age_days: int
     cleanup_every_cycles: int
-    # Orders younger than this are still scored after downtime.
-    # 0 disables the age gate (same as FRESH_ORDER_MAX_AGE_MINUTES=0).
+    # Unused for the send window. Kept so existing .env files still load.
     backlog_max_age_minutes: int
     llm_concurrency: int
     # SQLite path. Docker sets /data/orders.db so the WAL sits on the volume.
@@ -128,7 +127,9 @@ def load_settings() -> Settings:
             "FRESH_ORDER_MAX_AGE_MINUTES", 30, lo=0, hi=60 * 24 * 7
         ),
         kwork_cookies=os.getenv("KWORK_COOKIES", ""),
-        kwork_categories=_int_tuple("KWORK_CATEGORIES", (41, 11, 45)),
+        kwork_categories=_int_tuple(
+            "KWORK_CATEGORIES", (41, 37, 38, 39, 80, 255)
+        ),
         flru_cookies=os.getenv("FLRU_COOKIES", ""),
         cleanup_max_age_days=_bounded_int("CLEANUP_MAX_AGE_DAYS", 30, lo=0, hi=365),
         cleanup_every_cycles=_bounded_int("CLEANUP_EVERY_CYCLES", 60, lo=1, hi=10000),

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from config import Settings
 from db import Database
@@ -86,6 +87,7 @@ class Scheduler:
             *(self._fetch_one(ex) for ex in self.exchanges),
             return_exceptions=True,
         )
+        not_before = await self._notify_not_before()
         # Process orders sequentially across sources to avoid hammering the
         # LLM with parallel calls (LLM rate-limit > exchange rate-limit).
         for exchange, result in zip(self.exchanges, results):
@@ -98,7 +100,7 @@ class Scheduler:
             logger.info(
                 "Processing %s: %d orders fetched", exchange.source_name, len(result)
             )
-            await self._process_orders(exchange, result)
+            await self._process_orders(exchange, result, not_before)
 
     async def _fetch_one(self, exchange: Exchange) -> list[Order]:
         try:
@@ -115,24 +117,37 @@ class Scheduler:
     def _scoring_max_age(self) -> int:
         """Minutes after which a never-seen order is recorded and not scored.
 
-        0 on either knob disables the gate. Otherwise the wider of the fresh
-        window and the backlog window is used, so a restart still scores
-        orders that appeared while the bot was down.
+        0 disables the age cap. Orders older than the cutoff stored in the
+        database are never scored, even inside this window.
         """
-        fresh = self.settings.fresh_order_max_age_minutes
-        backlog = self.settings.backlog_max_age_minutes
-        if fresh == 0 or backlog == 0:
-            return 0
-        return max(fresh, backlog)
+        return self.settings.fresh_order_max_age_minutes
+
+    async def _notify_not_before(self) -> datetime:
+        """Publication cutoff. Set once, so a restart does not move it."""
+        cached = getattr(self, "_notify_after", None)
+        if isinstance(cached, datetime):
+            return cached
+        raw = await self.db.meta_get("notify_after")
+        if raw:
+            cutoff = datetime.fromisoformat(raw)
+        else:
+            cutoff = datetime.now(timezone.utc).replace(microsecond=0)
+            await self.db.meta_set("notify_after", cutoff.isoformat())
+            logger.info(
+                "Notify cutoff set to %s. Older orders will not be sent.",
+                cutoff.isoformat(),
+            )
+        self._notify_after = cutoff
+        return cutoff
 
     async def _process_orders(
-        self, exchange: Exchange, orders: list[Order]
+        self, exchange: Exchange, orders: list[Order], not_before: datetime
     ) -> None:
         fetched_count = len(orders)
         # Few existing bids and a buyer who actually hires go to the model first.
         ranked = sorted(orders, key=lambda order: _priority(exchange, order))
         tallies = await asyncio.gather(
-            *(self._handle_order(exchange, order) for order in ranked),
+            *(self._handle_order(exchange, order, not_before) for order in ranked),
             return_exceptions=True,
         )
         total = _Tally()
@@ -193,18 +208,26 @@ class Scheduler:
                 preview,
             )
 
-    async def _handle_order(self, exchange: Exchange, order: Order) -> _Tally:
+    async def _handle_order(
+        self, exchange: Exchange, order: Order, not_before: datetime
+    ) -> _Tally:
         tally = _Tally()
         state = await self.db.pipeline_state(order.url)
         if state in ("done", "skipped"):
             tally.duplicates = 1
             return tally
 
-        max_age = self._scoring_max_age()
-        age_minutes = exchange.order_age_minutes(order)
-        if max_age > 0 and age_minutes is not None and age_minutes > max_age:
+        now = datetime.now(timezone.utc)
+        if not is_fresh_enough(
+            order.published_at,
+            not_before=not_before,
+            now=now,
+            max_age_minutes=self._scoring_max_age(),
+        ):
             if state == "missing":
                 await self.db.save_order_if_new(order, relevance=None, skipped=True)
+                if order.published_at is None:
+                    logger.info("Skip %s: publication time is missing", order.url)
             else:
                 await self.db.mark_skipped(order.url)
             tally.stale_skipped = 1
@@ -316,6 +339,29 @@ class _Tally:
         self.notify_errors += other.notify_errors
         self.sent += other.sent
         self.relevance_sum += other.relevance_sum
+
+
+def is_fresh_enough(
+    published_at: datetime | None,
+    *,
+    not_before: datetime,
+    now: datetime,
+    max_age_minutes: int,
+) -> bool:
+    """True only for a known publication time after the cutoff and inside the window.
+
+    Missing timestamps are rejected. FL.ru omits "N назад" on older cards and
+    prints a calendar date instead; treating that as "fresh" sent days-old orders.
+    """
+    if published_at is None:
+        return False
+    if published_at < not_before:
+        return False
+    if max_age_minutes > 0:
+        age_minutes = (now - published_at).total_seconds() / 60
+        if age_minutes > max_age_minutes:
+            return False
+    return True
 
 
 def _priority(exchange: Exchange, order: Order) -> tuple[int, int, int]:

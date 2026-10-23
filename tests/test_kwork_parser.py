@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from exchanges.kwork import kwork_category_id, parse_kwork_hire_stats
+from exchanges.kwork import kwork_category_id, kwork_published_at, parse_kwork_hire_stats
 
 try:
     from zoneinfo import ZoneInfo
@@ -65,6 +65,14 @@ def test_kwork_url_and_price_format() -> None:
     price_limit = (item.get("priceLimit") or "").strip()
     price = f"{price_limit} RUB" if price_limit else "по договоренности"
     assert price.endswith("RUB") or price == "по договоренности"
+
+
+def test_kwork_published_at_is_moscow() -> None:
+    published = kwork_published_at("2026-10-23 08:24:47")
+    assert published is not None
+    assert published == datetime(2026, 10, 23, 5, 24, 47, tzinfo=timezone.utc)
+    assert kwork_published_at("") is None
+    assert kwork_published_at("not-a-date") is None
 
 
 def test_kwork_category_id_accepts_string() -> None:
