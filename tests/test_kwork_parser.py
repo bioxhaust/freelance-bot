@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from exchanges.kwork import parse_kwork_hire_stats
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
@@ -63,3 +65,25 @@ def test_kwork_url_and_price_format() -> None:
     price_limit = (item.get("priceLimit") or "").strip()
     price = f"{price_limit} RUB" if price_limit else "по договоренности"
     assert price.endswith("RUB") or price == "по договоренности"
+
+
+def test_parse_kwork_hire_stats() -> None:
+    percent, count = parse_kwork_hire_stats(
+        {"data": {"wants_hired_percent": "85", "wants_count": "37"}}
+    )
+    assert percent == 85
+    assert count == 37
+
+    # 0 is a real value: the buyer has projects and has not hired anyone.
+    percent, count = parse_kwork_hire_stats(
+        {"data": {"wants_hired_percent": "0", "wants_count": "1"}}
+    )
+    assert percent == 0
+    assert count == 1
+
+    assert parse_kwork_hire_stats({}) == (None, None)
+    assert parse_kwork_hire_stats({"data": {"wants_hired_percent": "nope"}}) == (None, None)
+    assert parse_kwork_hire_stats({"data": {"wants_hired_percent": "150", "wants_count": "-1"}}) == (
+        None,
+        None,
+    )

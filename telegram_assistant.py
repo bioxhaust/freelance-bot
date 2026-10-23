@@ -34,6 +34,13 @@ _TONE_HINTS: dict[str, str] = {
     "tone_hard": "более уверенный, деловой и экспертный тон",
 }
 
+def _hire_suffix(order: Order) -> str:
+    phrase = order.hire_phrase()
+    if not phrase:
+        return ""
+    return " · " + html.escape(phrase, quote=False)
+
+
 _KNOWN_CALLBACKS: frozenset[str] = frozenset(
     {
         "send",
@@ -484,7 +491,10 @@ class TelegramAssistant:
         for o in applied[:5]:
             title_safe = html.escape(o.title[:60], quote=False)
             url_safe = html.escape(o.url, quote=True)
-            lines.append(f'   • <a href="{url_safe}">{title_safe}</a> · {html.escape(o.source, quote=False)}')
+            lines.append(
+                f'   • <a href="{url_safe}">{title_safe}</a> · '
+                f"{html.escape(o.source, quote=False)}{_hire_suffix(o)}"
+            )
 
         if unhandled:
             lines.append("")
@@ -495,7 +505,7 @@ class TelegramAssistant:
                 url_safe = html.escape(o.url, quote=True)
                 lines.append(
                     f'   • <a href="{url_safe}">{title_safe}</a> · '
-                    f'{rel}% · {html.escape(o.source, quote=False)}'
+                    f"{rel}% · {html.escape(o.source, quote=False)}{_hire_suffix(o)}"
                 )
 
         lines.append("")

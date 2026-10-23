@@ -11,7 +11,7 @@ from exchanges import Order
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _REQUIRED_COLUMNS = frozenset(
     {
@@ -27,7 +27,14 @@ _REQUIRED_COLUMNS = frozenset(
         "applied",
         "applied_at",
         "created_at",
+        "client_hire_percent",
+        "client_orders_count",
     }
+)
+
+_ORDER_COLUMNS = (
+    "title, description, price, deadline, client, source, url, "
+    "client_hire_percent, client_orders_count"
 )
 
 _CREATE_ORDERS_SQL = """
@@ -43,7 +50,9 @@ CREATE TABLE IF NOT EXISTS orders (
     relevance    INTEGER,
     applied      INTEGER NOT NULL DEFAULT 0,
     applied_at   DATETIME,
-    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    client_hire_percent INTEGER,
+    client_orders_count INTEGER
 );
 """
 
@@ -123,6 +132,16 @@ class Database:
                 "ALTER TABLE orders ADD COLUMN applied_at DATETIME"
             )
             logger.warning("Migration: added orders.applied_at column")
+        if "client_hire_percent" not in cols:
+            await conn.execute(
+                "ALTER TABLE orders ADD COLUMN client_hire_percent INTEGER"
+            )
+            logger.warning("Migration: added orders.client_hire_percent column")
+        if "client_orders_count" not in cols:
+            await conn.execute(
+                "ALTER TABLE orders ADD COLUMN client_orders_count INTEGER"
+            )
+            logger.warning("Migration: added orders.client_orders_count column")
 
         await conn.execute(
             "INSERT OR REPLACE INTO _meta(key, value) VALUES('schema_version', ?)",
@@ -162,8 +181,9 @@ class Database:
             cur = await self.conn.execute(
                 """
                 INSERT OR IGNORE INTO orders
-                    (title, description, price, deadline, client, source, url, relevance)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (title, description, price, deadline, client, source, url, relevance,
+                     client_hire_percent, client_orders_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.title,
@@ -174,6 +194,8 @@ class Database:
                     order.source,
                     order.url,
                     relevance,
+                    order.client_hire_percent,
+                    order.client_orders_count,
                 ),
             )
             return cur.rowcount > 0
@@ -183,8 +205,8 @@ class Database:
 
     async def get_order_by_url(self, url: str) -> Optional[Order]:
         async with self.conn.execute(
-            """
-            SELECT title, description, price, deadline, client, source, url
+            f"""
+            SELECT {_ORDER_COLUMNS}
             FROM orders
             WHERE url = ?
             LIMIT 1
@@ -194,15 +216,7 @@ class Database:
             row = await cur.fetchone()
         if row is None:
             return None
-        return Order(
-            title=row[0],
-            description=row[1],
-            price=row[2],
-            deadline=row[3],
-            client=row[4],
-            source=row[5],
-            url=row[6],
-        )
+        return _order_from_row(row)
 
     async def update_relevance(self, url: str, relevance: int) -> None:
         await self.conn.execute(
@@ -281,8 +295,8 @@ class Database:
         """Top relevance >=threshold orders from last 24h that the user
         has not yet marked applied. Used by /digest."""
         async with self.conn.execute(
-            """
-            SELECT title, description, price, deadline, client, source, url
+            f"""
+            SELECT {_ORDER_COLUMNS}
             FROM orders
             WHERE relevance IS NOT NULL
               AND relevance >= ?
@@ -294,13 +308,7 @@ class Database:
             (int(threshold), int(limit)),
         ) as cur:
             rows = [r async for r in cur]
-        return [
-            Order(
-                title=r[0], description=r[1], price=r[2], deadline=r[3],
-                client=r[4], source=r[5], url=r[6],
-            )
-            for r in rows
-        ]
+        return [_order_from_row(r) for r in rows]
 
     async def cleanup_old(self, *, max_age_days: int) -> int:
         """Delete orders older than N days that the user never marked applied.
@@ -330,8 +338,8 @@ class Database:
 
     async def applied_today(self, limit: int = 10) -> list[Order]:
         async with self.conn.execute(
-            """
-            SELECT title, description, price, deadline, client, source, url
+            f"""
+            SELECT {_ORDER_COLUMNS}
             FROM orders
             WHERE applied = 1
               AND applied_at >= datetime('now','-1 day')
@@ -341,10 +349,23 @@ class Database:
             (int(limit),),
         ) as cur:
             rows = [r async for r in cur]
-        return [
-            Order(
-                title=r[0], description=r[1], price=r[2], deadline=r[3],
-                client=r[4], source=r[5], url=r[6],
-            )
-            for r in rows
-        ]
+        return [_order_from_row(r) for r in rows]
+
+
+def _order_from_row(row: aiosqlite.Row) -> Order:
+    def _opt_int(name: str) -> Optional[int]:
+        if name not in row.keys() or row[name] is None:
+            return None
+        return int(row[name])
+
+    return Order(
+        title=row["title"],
+        description=row["description"],
+        price=row["price"],
+        deadline=row["deadline"],
+        client=row["client"],
+        source=row["source"],
+        url=row["url"],
+        client_hire_percent=_opt_int("client_hire_percent"),
+        client_orders_count=_opt_int("client_orders_count"),
+    )

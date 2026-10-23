@@ -193,8 +193,14 @@ def render_order_card(order: Order, relevance: int, draft_reply: str) -> str:
         lines.append(f"💰 {price}")
     if (deadline := _safe_field(order.deadline)) is not None:
         lines.append(f"⏱ {deadline}")
-    if (client := _safe_field(order.client)) is not None:
+    client = _safe_field(order.client)
+    hire = order.hire_phrase()
+    if client and hire:
+        lines.append(f"👤 {client} · {hire}")
+    elif client:
         lines.append(f"👤 {client}")
+    elif hire:
+        lines.append(f"👤 {hire}")
     lines.append("")
     if desc:
         lines.append(desc)

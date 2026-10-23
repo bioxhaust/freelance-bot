@@ -83,6 +83,7 @@ class KworkExchange(Exchange):
             price = f"{price_limit} RUB" if price_limit else "по договоренности"
             deadline = (item.get("max_days") or "").strip() or "не указан"
             client = (user.get("username") or "").strip() or "не указан"
+            hire_percent, orders_count = parse_kwork_hire_stats(user)
             url = f"https://kwork.ru/projects/{order_id}/view"
             if url in seen_urls:
                 continue
@@ -115,6 +116,8 @@ class KworkExchange(Exchange):
                     client=client,
                     source=self.source_name,
                     url=url,
+                    client_hire_percent=hire_percent,
+                    client_orders_count=orders_count,
                 )
             )
 
@@ -150,3 +153,34 @@ class KworkExchange(Exchange):
 
         page_items = ((payload.get("data") or {}).get("pagination") or {}).get("data") or []
         return page_items
+
+
+def parse_kwork_hire_stats(user: dict) -> tuple[Optional[int], Optional[int]]:
+    """Read buyer hire rate from a Kwork project user object.
+
+    `wants_hired_percent` is the share of this buyer's projects where they
+    picked a freelancer. `wants_count` is how many projects that share covers.
+    Both arrive as strings. Missing or garbage values become None; 0 is kept.
+    """
+    data = user.get("data") if isinstance(user, dict) else None
+    if not isinstance(data, dict):
+        return None, None
+    return (
+        _stat_int(data.get("wants_hired_percent"), hi=100),
+        _stat_int(data.get("wants_count"), hi=1_000_000),
+    )
+
+
+def _stat_int(raw: object, *, hi: int) -> Optional[int]:
+    if raw is None:
+        return None
+    text = str(raw).strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        value = int(round(float(text)))
+    except (TypeError, ValueError):
+        return None
+    if value < 0 or value > hi:
+        return None
+    return value

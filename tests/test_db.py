@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 
 import pytest
@@ -40,6 +41,7 @@ async def test_schema_has_required_columns(db: Database) -> None:
     async with db.conn.execute("PRAGMA table_info(orders)") as cur:
         cols = {row[1] async for row in cur}
     assert {"applied", "applied_at", "relevance", "url", "source"} <= cols
+    assert {"client_hire_percent", "client_orders_count"} <= cols
 
 
 @pytest.mark.asyncio
@@ -130,3 +132,59 @@ async def test_cleanup_old_keeps_applied(db: Database) -> None:
     assert await db.get_order_by_url(fresh.url) is not None
     assert await db.get_order_by_url(old_applied.url) is not None
     assert await db.get_order_by_url(old_unapplied.url) is None
+
+
+@pytest.mark.asyncio
+async def test_hire_stats_survive_reload_and_old_schema() -> None:
+    tmp_dir = tempfile.mkdtemp(prefix="bot_test_mig_")
+    path = os.path.join(tmp_dir, "legacy.db")
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        """
+        CREATE TABLE orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            price TEXT NOT NULL,
+            deadline TEXT NOT NULL,
+            client TEXT NOT NULL,
+            source TEXT NOT NULL,
+            url TEXT NOT NULL UNIQUE,
+            relevance INTEGER,
+            applied INTEGER NOT NULL DEFAULT 0,
+            applied_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO _meta(key, value) VALUES ('schema_version', '2');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    instance = Database(path)
+    await instance.init()
+    try:
+        order = _order(7)
+        order.client = "pasha-project"
+        order.client_hire_percent = 85
+        order.client_orders_count = 37
+        assert await instance.save_order_if_new(order, relevance=90) is True
+
+        loaded = await instance.get_order_by_url(order.url)
+        assert loaded is not None
+        assert loaded.client_hire_percent == 85
+        assert loaded.client_orders_count == 37
+        assert loaded.hire_phrase() == "нанял в 85% из 37 заказов"
+
+        top = await instance.top_unhandled(threshold=70, limit=5)
+        assert top[0].client_hire_percent == 85
+
+        plain = _order(8, source="FL.ru")
+        await instance.save_order_if_new(plain, relevance=80)
+        flru = await instance.get_order_by_url(plain.url)
+        assert flru is not None
+        assert flru.client_hire_percent is None
+        assert flru.hire_phrase() is None
+    finally:
+        await instance.close()
